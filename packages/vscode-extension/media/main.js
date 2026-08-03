@@ -7,7 +7,6 @@ const activity = document.querySelector('#activity');
 const intent = document.querySelector('#intent');
 const inspectText = document.querySelector('#inspectText');
 
-let latestOutput = '';
 let currentState = null;
 
 function faceFor(state) {
@@ -43,54 +42,118 @@ function setSignal(next) {
   face.textContent = faceFor(next);
 }
 
+function makeButton(label, action) {
+  const button = document.createElement('button');
+  button.dataset.action = action;
+  button.textContent = label;
+  return button;
+}
+
+function appendDetailList(target, rows) {
+  const list = document.createElement('dl');
+  for (const [name, value] of rows) {
+    const dt = document.createElement('dt');
+    dt.textContent = name;
+    const dd = document.createElement('dd');
+    dd.textContent = value;
+    list.append(dt, dd);
+  }
+  target.append(list);
+}
+
 function renderProject(project, fixture) {
   const root = project.root || 'NO PROJECT';
   const name = project.repository ? root.split(/[\\/]/).filter(Boolean).pop() : 'NO PROJECT';
   document.querySelector('#projectName').textContent = name;
   document.querySelector('#root').textContent = root;
-  document.querySelector('#projectCard').innerHTML = `
-    <h1>${name}</h1>
-    <dl>
-      <dt>STATE</dt><dd>${project.state || 'NO PROJECT'}</dd>
-      <dt>ROOT</dt><dd>${root}</dd>
-      <dt>ORIGIN</dt><dd>${project.origin || '—'}</dd>
-      <dt>BRANCH</dt><dd>${project.branch || '—'}</dd>
-      <dt>COMMIT</dt><dd>${project.head ? project.head.slice(0, 12) : '—'}</dd>
-      <dt>DIRTY</dt><dd>${String(project.changes?.length || 0)}</dd>
-      <dt>CAPS</dt><dd>${fixture ? `${fixture.state}${fixture.discovered?.length ? ` · ${fixture.discovered.join(', ')}` : ''}` : 'unknown'}</dd>
-    </dl>
-    <div class="inline-actions"><button data-action="open">OPEN</button><button data-action="clone">CLONE</button><button data-action="refresh">REFRESH</button><button data-action="status">STATUS</button></div>
-  `;
+
+  const card = document.querySelector('#projectCard');
+  card.replaceChildren();
+
+  const title = document.createElement('h1');
+  title.textContent = name;
+  card.append(title);
+
+  appendDetailList(card, [
+    ['STATE', project.state || 'NO PROJECT'],
+    ['ROOT', root],
+    ['ORIGIN', project.origin || '—'],
+    ['BRANCH', project.branch || '—'],
+    ['COMMIT', project.head ? project.head.slice(0, 12) : '—'],
+    ['DIRTY', String(project.changes?.length || 0)],
+    ['CAPS', fixture ? `${fixture.state}${fixture.discovered?.length ? ` · ${fixture.discovered.join(', ')}` : ''}` : 'unknown']
+  ]);
+
+  const actions = document.createElement('div');
+  actions.className = 'inline-actions';
+  actions.append(
+    makeButton('OPEN', 'open'),
+    makeButton('CLONE', 'clone'),
+    makeButton('REFRESH', 'refresh'),
+    makeButton('STATUS', 'status')
+  );
+  card.append(actions);
 }
 
 function renderWork(order, orders) {
-  const recent = (orders || []).slice(-4).reverse();
+  const card = document.querySelector('#workCard');
+  card.replaceChildren();
+
   if (!order) {
-    document.querySelector('#workCard').className = 'card empty';
-    document.querySelector('#workCard').innerHTML = 'NO ORDER';
+    card.className = 'card empty';
+    card.textContent = 'NO ORDER';
     return;
   }
-  document.querySelector('#workCard').className = 'card';
-  document.querySelector('#workCard').innerHTML = `
-    <h1>${order.intent}</h1>
-    <dl>
-      <dt>STATUS</dt><dd>${String(order.status || 'ready').toUpperCase()}</dd>
-      <dt>BASE</dt><dd>${order.authority.commit ? order.authority.commit.slice(0, 12) : '—'}</dd>
-      <dt>FILES</dt><dd>${String(order.authority.dirty?.length || 0)}</dd>
-      <dt>ID</dt><dd>${order.id}</dd>
-    </dl>
-    <div class="recent">
-      <div class="section-title small">RECENT</div>
-      ${(recent.length ? recent.map((item) => `<div class="recent-row"><span>${item.id}</span><strong>${item.intent}</strong></div>`).join('') : '<div class="muted">NO RECENT ORDERS</div>')}
-    </div>
-  `;
+
+  card.className = 'card';
+  const title = document.createElement('h1');
+  title.textContent = order.intent;
+  card.append(title);
+
+  appendDetailList(card, [
+    ['STATUS', String(order.status || 'ready').toUpperCase()],
+    ['BASE', order.authority.commit ? order.authority.commit.slice(0, 12) : '—'],
+    ['FILES', String(order.authority.dirty?.length || 0)],
+    ['ID', order.id]
+  ]);
+
+  const recent = document.createElement('div');
+  recent.className = 'recent';
+  const recentTitle = document.createElement('div');
+  recentTitle.className = 'section-title small';
+  recentTitle.textContent = 'RECENT';
+  recent.append(recentTitle);
+
+  const items = (orders || []).slice(-4).reverse();
+  if (!items.length) {
+    const empty = document.createElement('div');
+    empty.className = 'muted';
+    empty.textContent = 'NO RECENT ORDERS';
+    recent.append(empty);
+  } else {
+    for (const item of items) {
+      const row = document.createElement('div');
+      row.className = 'recent-row';
+      const id = document.createElement('span');
+      id.textContent = item.id;
+      const summary = document.createElement('strong');
+      summary.textContent = item.intent;
+      row.append(id, summary);
+      recent.append(row);
+    }
+  }
+
+  card.append(recent);
 }
 
 function renderChat() {
-  document.querySelector('#chatCard').innerHTML = `
-    <h1>CHAT</h1>
-    <p>Type freely below. RUN executes under the verified root. GOAL records a bounded order. PACKET copies the current order for any provider.</p>
-  `;
+  const card = document.querySelector('#chatCard');
+  card.replaceChildren();
+  const title = document.createElement('h1');
+  title.textContent = 'CHAT';
+  const body = document.createElement('p');
+  body.textContent = 'Type freely below. RUN executes under the verified root. GOAL records a bounded order. PACKET copies the current order for any provider.';
+  card.append(title, body);
 }
 
 tabs.forEach((tab) => tab.addEventListener('click', () => show(tab.dataset.view)));
@@ -122,18 +185,15 @@ window.addEventListener('message', ({ data }) => {
     renderProject(data.project, data.fixture);
     renderWork(data.order, data.orders);
     renderChat();
-    latestOutput = data.running?.output || data.latest?.output || '';
     inspectText.textContent = data.inspect || 'NO OUTPUT';
     setSignal(data.running ? 'RUN' : (data.project.state || (data.project.repository ? 'READY' : 'NO PROJECT')));
   }
   if (data.type === 'running') {
-    latestOutput = data.output || latestOutput;
-    inspectText.textContent = currentState?.inspect || inspectText.textContent;
+    inspectText.textContent = data.output || currentState?.inspect || 'NO OUTPUT';
     setSignal('RUN');
     show('inspect');
   }
   if (data.type === 'result') {
-    latestOutput = data.result?.output || latestOutput;
     inspectText.textContent = data.text;
     setSignal(data.ok ? 'PASS' : (data.result?.classification === 'stopped' ? 'STOP' : 'FAIL'));
     if (data.ok) intent.value = '';
