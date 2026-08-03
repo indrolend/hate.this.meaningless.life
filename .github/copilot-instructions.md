@@ -1,0 +1,1 @@
+Read `AGENTS.md`, `docs/PRODUCT.md`, `docs/ARCHITECTURE.md`, `docs/MATERIAL-INVENTORY.md`, and `COPILOT-HANDOFF.md` before editing. Existing files are evidence. Integrate them; do not regenerate the product from a vague description. Work narrowly, preserve dirty state, verify focused-to-broad, and return reproducible evidence.

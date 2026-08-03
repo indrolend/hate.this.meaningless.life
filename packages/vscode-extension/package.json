@@ -1,0 +1,37 @@
+{
+  "name": "datafactory",
+  "displayName": "DataFactory",
+  "description": "A local-first project harness for human-directed, agent-assisted work.",
+  "version": "0.2.0",
+  "publisher": "indrolend",
+  "license": "MIT",
+  "engines": { "vscode": "^1.100.0" },
+  "categories": ["Other"],
+  "activationEvents": ["onStartupFinished", "onCommand:dataFactory.open"],
+  "main": "./src/extension.js",
+  "contributes": {
+    "commands": [
+      { "command": "dataFactory.open", "title": "DataFactory: Open" },
+      { "command": "dataFactory.refresh", "title": "DataFactory: Refresh" },
+      { "command": "dataFactory.goal", "title": "DataFactory: Create Goal" },
+      { "command": "dataFactory.status", "title": "DataFactory: Run Status" }
+    ],
+    "configuration": {
+      "title": "DataFactory",
+      "properties": {
+        "dataFactory.openOnStartup": {
+          "type": "boolean",
+          "default": false,
+          "description": "Open DataFactory with the workspace."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "check": "node --check src/extension.js && node --check src/core.js && node --check media/main.js",
+    "test": "node --test tests/*.test.js",
+    "verify": "npm run check && npm test",
+    "package": "vsce package --allow-missing-repository"
+  },
+  "devDependencies": { "@vscode/vsce": "^3.6.2" }
+}

@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "name": "Digital Breakdown",
+  "repository": "https://github.com/indrolend/digital-breakdown-apk.git",
+  "visibility": "private",
+  "defaultClonePath": "%USERPROFILE%\\Projects\\digital-breakdown-apk",
+  "mode": "read-only-fixture",
+  "discover": [
+    "AGENTS.md",
+    "scripts/verify-gameplay.ps1",
+    "scripts/verify-gameplay.sh",
+    "package.json",
+    "native-desktop/CMakeLists.txt"
+  ],
+  "prohibited": [
+    "modify source",
+    "commit",
+    "push",
+    "merge",
+    "deploy",
+    "publish release"
+  ]
+}
