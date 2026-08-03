@@ -37,8 +37,10 @@ intent.addEventListener('keydown', (event) => {
 window.addEventListener('message', ({ data }) => {
   if (data.type === 'state') {
     const p = data.project;
-    document.querySelector('#root').textContent = p.root;
-    document.querySelector('#projectCard').innerHTML = `<h1>${p.repository ? p.branch : 'NOT GIT'}</h1><dl><dt>COMMIT</dt><dd>${p.head ? p.head.slice(0, 12) : '—'}</dd><dt>CHANGES</dt><dd>${p.changes.length}</dd><dt>PATH</dt><dd>${p.root}</dd></dl>`;
+    signal.textContent = p.state || (p.repository ? 'READY' : 'NO PROJECT');
+    face.textContent = signal.textContent === 'FAIL' ? '(×_×)' : '(•‿•)';
+    document.querySelector('#root').textContent = p.root || 'NO PROJECT';
+    document.querySelector('#projectCard').innerHTML = `<h1>${p.repository ? p.branch : 'NOT GIT'}</h1><dl><dt>STATE</dt><dd>${p.state || 'NO PROJECT'}</dd><dt>COMMIT</dt><dd>${p.head ? p.head.slice(0, 12) : '—'}</dd><dt>CHANGES</dt><dd>${p.changes.length}</dd><dt>PATH</dt><dd>${p.root || 'NO PROJECT'}</dd></dl>`;
     const card = document.querySelector('#orderCard');
     if (data.order) {
       const o = data.order;

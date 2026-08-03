@@ -1,7 +1,15 @@
 'use strict';
 const test = require('node:test');
 const assert = require('node:assert/strict');
-const { createOrder, agentPacket, cleanIntent } = require('../src/core');
+const {
+  createOrder,
+  agentPacket,
+  cleanIntent,
+  defaultCloneDestination,
+  isForbiddenImplicitProject,
+  sameOrigin,
+  inspectProject
+} = require('../src/core');
 
 const project = { root: '/repo', branch: 'main', head: 'abc123', changes: [' M game.cpp'] };
 
@@ -26,4 +34,30 @@ test('agent packet retains authority and evidence', () => {
 
 test('rejects empty goals', () => {
   assert.throws(() => createOrder('  ', project), /empty/);
+});
+
+test('clone destination is deterministic', () => {
+  assert.equal(
+    defaultCloneDestination('C:\\Users\\alice'),
+    'C:\\Users\\alice\\Projects\\hate.this.meaningless.life'
+  );
+});
+
+test('startup does not implicitly select profile roots', () => {
+  const home = 'C:\\Users\\alice';
+  assert.equal(isForbiddenImplicitProject(home, home), true);
+  assert.equal(isForbiddenImplicitProject(`${home}\\Desktop`, home), true);
+  assert.equal(isForbiddenImplicitProject(`${home}\\Downloads`, home), true);
+  assert.equal(isForbiddenImplicitProject(`${home}\\Projects\\digital-breakdown-apk`, home), false);
+});
+
+test('origin mismatch is rejected', () => {
+  assert.equal(sameOrigin('https://github.com/indrolend/hate.this.meaningless.life.git', 'git@github.com:indrolend/hate.this.meaningless.life.git'), true);
+  assert.equal(sameOrigin('https://github.com/indrolend/hate.this.meaningless.life.git', 'https://github.com/indrolend/digital-breakdown-apk.git'), false);
+});
+
+test('missing project yields NO PROJECT', async () => {
+  const missing = await inspectProject('');
+  assert.equal(missing.state, 'NO PROJECT');
+  assert.equal(missing.verified, false);
 });
