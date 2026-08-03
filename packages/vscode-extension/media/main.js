@@ -7,6 +7,18 @@ const activity = document.querySelector('#activity');
 const intent = document.querySelector('#intent');
 let packet = '';
 
+function fillDetails(card, rows) {
+  const list = document.createElement('dl');
+  rows.forEach(([name, value]) => {
+    const dt = document.createElement('dt');
+    dt.textContent = name;
+    const dd = document.createElement('dd');
+    dd.textContent = value;
+    list.append(dt, dd);
+  });
+  card.append(list);
+}
+
 function show(name) {
   views.forEach((view) => view.classList.toggle('active', view.id === name));
   tabs.forEach((tab) => tab.classList.toggle('active', tab.dataset.view === name));
@@ -40,13 +52,30 @@ window.addEventListener('message', ({ data }) => {
     signal.textContent = p.state || (p.repository ? 'READY' : 'NO PROJECT');
     face.textContent = signal.textContent === 'FAIL' ? '(×_×)' : '(•‿•)';
     document.querySelector('#root').textContent = p.root || 'NO PROJECT';
-    document.querySelector('#projectCard').innerHTML = `<h1>${p.repository ? p.branch : 'NOT GIT'}</h1><dl><dt>STATE</dt><dd>${p.state || 'NO PROJECT'}</dd><dt>COMMIT</dt><dd>${p.head ? p.head.slice(0, 12) : '—'}</dd><dt>CHANGES</dt><dd>${p.changes.length}</dd><dt>PATH</dt><dd>${p.root || 'NO PROJECT'}</dd></dl>`;
+    const projectCard = document.querySelector('#projectCard');
+    projectCard.replaceChildren();
+    const branchTitle = document.createElement('h1');
+    branchTitle.textContent = p.repository ? p.branch : 'NOT GIT';
+    projectCard.append(branchTitle);
+    fillDetails(projectCard, [
+      ['STATE', p.state || 'NO PROJECT'],
+      ['COMMIT', p.head ? p.head.slice(0, 12) : '—'],
+      ['CHANGES', String(p.changes.length)],
+      ['PATH', p.root || 'NO PROJECT']
+    ]);
     const card = document.querySelector('#orderCard');
     if (data.order) {
       const o = data.order;
       packet = JSON.stringify(o, null, 2);
       card.className = 'card';
-      card.innerHTML = `<small>${o.id}</small><h1>${o.intent.replace(/[<>&]/g, '')}</h1><p>${o.status.toUpperCase()}</p>`;
+      card.replaceChildren();
+      const id = document.createElement('small');
+      id.textContent = o.id;
+      const orderIntent = document.createElement('h1');
+      orderIntent.textContent = o.intent;
+      const status = document.createElement('p');
+      status.textContent = o.status.toUpperCase();
+      card.append(id, orderIntent, status);
       document.querySelector('#inspectText').textContent = packet;
       intent.value = '';
       show('work');
