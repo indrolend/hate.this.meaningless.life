@@ -1,29 +1,64 @@
 # hate.this.meaningless.life
 
-A local-first development instrument for human-directed, agent-assisted work.
+`funny.html` is a small command HUD for the modern copy-and-paste development loop:
 
-This seed repository contains working material, not just a product proposal:
+1. Copy a command from an LLM.
+2. Paste it into **INPUT**.
+3. Press Enter.
+4. Read the exact result in **OUTPUT**.
+5. Click **COPY** and return it to the conversation. History entries can also be loaded back into INPUT or rerun directly.
 
-- `legacy/commandhud/CommandHud-v21.ps1` — the complete Windows Command HUD prototype.
-- `packages/vscode-extension/` — the tested DataFactory VS Code extension slice.
-- `portable/` — the current Windows portable bootstrap and packaged VSIX.
-- `docs/` — product contract, architecture, and integration plan.
-- `examples/digital-breakdown.project.json` — the first real project adapter.
+The HUD executes only inside a verified Git repository. On Windows it uses Windows PowerShell explicitly, so PowerShell commands such as `Get-Location` are not accidentally sent to `cmd.exe`. Shift+Enter inserts a newline. Command output and metadata are stored outside the repository under `%LOCALAPPDATA%\hate.this.meaningless.life`, or beside a removable installation when launched through its shortcut.
 
-## Product invariant
 
-No verified repository root, no command execution.
+## 0.6 workflow
 
-The application must never silently use Desktop, Downloads, the user profile, or an accidental shell working directory as the project.
+- Paste a command, press Enter, and watch exact raw output.
+- `COPY: REDUCED` is the default and deterministically selects causal errors, summaries, and useful context.
+- Scroll over any copy button to switch between `REDUCED` and `RAW`.
+- History is stored as immutable expandable run cards with `LOAD`, `RERUN`, and `COPY`.
+- Cards show `CURRENT` only when both the Git commit and working-tree fingerprint still match.
 
-## Current verification
+## Install on Windows
 
-The extension core has syntax checks and four Node tests covering intent normalization, bounded order generation, authority retention, and empty-goal rejection.
+### Normal VS Code
+
+```powershell
+git clone https://github.com/indrolend/hate.this.meaningless.life.git
+Set-Location .\hate.this.meaningless.life
+.\install.ps1 -Project C:\path\to\your\repository
+```
+
+This installs the bundled VSIX through the existing `code` CLI and opens the verified project. It does not download another editor.
+
+### Self-contained portable host
+
+```powershell
+.\install.ps1 -Portable -Project C:\path\to\your\repository
+```
+
+Portable mode downloads the VS Code archive on first setup, installs the bundled extension, creates a Desktop shortcut, and opens the selected repository.
+
+### Update
+
+From an existing clean Git clone:
+
+```powershell
+.\update.ps1 -Project C:\path\to\your\repository
+```
+
+The updater performs a fast-forward-only pull and reinstalls the bundled extension. It refuses to overwrite local changes.
+
+See [`docs/CURRENT-STATE.md`](docs/CURRENT-STATE.md) for a compact authoritative handoff suitable for humans and LLMs.
+
+## Develop
 
 ```powershell
 Set-Location .\packages\vscode-extension
 npm.cmd install
 npm.cmd run verify
+Set-Location ..\..
+.\scripts\verify-windows.ps1
 ```
 
-Read `AGENTS.md` before changing source. The first integration order is in `COPILOT-HANDOFF.md`.
+The active HUD files are `media/funny.html`, `media/funny.css`, and `media/funny.js`. `src/extension.js` is the VS Code bridge; `src/core.js` owns Git inspection, execution, cancellation, and external project-keyed history. `legacy/commandhud/` is reference material, not active runtime code. The internal `dataFactory.*` command IDs remain temporarily for upgrade compatibility; they are not a second runtime.
