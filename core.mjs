@@ -259,11 +259,18 @@ export async function fetchUpdate(project, fetchImpl = fetch) {
   const manifest = await response.json();
   if (!/^[0-9a-f]{40}$/i.test(manifest.commit || '')) throw new Error('Remote manifest has unusable commit provenance.');
   const local = await gitSnapshot(project.root);
+  let status = 'current';
+  if (local.head !== manifest.commit) {
+    const remoteIsAncestor = await exec('git', ['merge-base', '--is-ancestor', manifest.commit, local.head], project.root);
+    const localIsAncestor = await exec('git', ['merge-base', '--is-ancestor', local.head, manifest.commit], project.root);
+    status = remoteIsAncestor.code === 0 ? 'local_ahead'
+      : localIsAncestor.code === 0 ? 'update_available' : 'diverged';
+  }
   const platformKey = platform() === 'win32' ? 'windows-x64' : platform() === 'darwin' ? 'macos-universal' : null;
   const artifact = platformKey ? manifest.artifacts?.[platformKey] : null;
   return {
     channel: project.identity.channel, localCommit: local.head, remoteCommit: manifest.commit,
-    status: local.head === manifest.commit ? 'current' : 'update_available',
+    status,
     platform: platformKey || `${platform()}-unsupported`, artifact: artifact || null,
   };
 }

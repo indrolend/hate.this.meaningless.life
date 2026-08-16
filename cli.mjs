@@ -22,7 +22,10 @@ function parse(argv) {
 }
 
 function printObject(object) {
-  for (const [key, value] of Object.entries(object)) console.log(`${key.toUpperCase()}=${value}`);
+  for (const [key, value] of Object.entries(object)) {
+    const rendered = value !== null && typeof value === 'object' ? JSON.stringify(value) : value;
+    console.log(`${key.replace(/([a-z])([A-Z])/g, '$1_$2').toUpperCase()}=${rendered}`);
+  }
 }
 
 function copy(text) {

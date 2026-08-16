@@ -64,6 +64,12 @@ test('update comparison uses canonical manifest commit and platform artifact', a
   const response = { ok: true, json: async () => ({ commit: head, artifacts: { 'windows-x64': { sha256: 'abc' } } }) };
   const update = await fetchUpdate(project, async () => response);
   assert.equal(update.status, 'current');
+
+  writeFileSync(join(root, 'file.txt'), 'new local commit\n');
+  execFileSync('git', ['add', 'file.txt'], { cwd: root });
+  execFileSync('git', ['commit', '-m', 'local ahead'], { cwd: root });
+  const ahead = await fetchUpdate(project, async () => response);
+  assert.equal(ahead.status, 'local_ahead');
 });
 
 test('packet schema contains only deterministic continuation fields', () => {
