@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
-import { basename, dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -31,6 +31,24 @@ async function exec(command, args, cwd) {
 
 function readJson(path) {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; }
+}
+
+function projectStatePath(project) {
+  return join(project.store, 'projects', project.key, 'state.json');
+}
+
+function emptyWorkingState() {
+  return { schemaVersion: SCHEMA_VERSION, lastRunId: null, objective: null, frontier: null };
+}
+
+export function readProjectState(project) {
+  return { ...emptyWorkingState(), ...(readJson(projectStatePath(project)) || {}) };
+}
+
+function writeProjectState(project, state) {
+  const directory = dirname(projectStatePath(project));
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(projectStatePath(project), `${JSON.stringify({ ...state, schemaVersion: SCHEMA_VERSION }, null, 2)}\n`);
 }
 
 function projectKey(identity) {
@@ -96,6 +114,75 @@ export async function gitSnapshot(root) {
     branch: branch.stdout || '(detached)', head: head.stdout, upstream,
     upstreamRef: upstreamRef.ok ? upstreamRef.stdout : null,
     dirty: changedFiles.length > 0, changedFiles, ahead, behind,
+  };
+}
+
+export async function repositoryCurrency(root) {
+  const snapshot = await gitSnapshot(root);
+  const files = await exec('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], root);
+  if (!files.ok) throw new Error(`Unable to enumerate repository currency: ${files.stderr}`);
+  const paths = files.stdout.split('\0').filter(Boolean).sort((a, b) => a.localeCompare(b));
+  const hash = createHash('sha256');
+  for (const path of paths) {
+    hash.update(path.replaceAll('\\', '/')); hash.update('\0');
+    try { hash.update(readFileSync(join(root, path))); }
+    catch (error) { hash.update(`UNREADABLE:${error.code || error.message}`); }
+    hash.update('\0');
+  }
+  return {
+    project: 'indrolend/data', root: resolve(root), head: snapshot.head,
+    worktreeFingerprint: `sha256:${hash.digest('hex')}`,
+  };
+}
+
+export function classifyEvidence(recordCurrency, currentCurrency) {
+  if (!recordCurrency?.head || !recordCurrency?.worktreeFingerprint) return 'UNKNOWN';
+  if (recordCurrency.head !== currentCurrency.head) return 'STALE';
+  return recordCurrency.worktreeFingerprint === currentCurrency.worktreeFingerprint ? 'CURRENT' : 'STALE';
+}
+
+export function setWorkingValue(project, field, value, currency) {
+  if (!['objective', 'frontier'].includes(field)) throw new Error(`Unsupported working state field: ${field}`);
+  const state = readProjectState(project);
+  state[field] = value === null ? null : {
+    value, updatedAt: new Date().toISOString(), updatedByRunId: state.lastRunId || null, currency,
+  };
+  writeProjectState(project, state);
+  return state[field];
+}
+
+export function workingValue(project, field) {
+  return readProjectState(project)[field] || null;
+}
+
+function meaningfulRun(record) {
+  const command = record.command || '';
+  return !/^(?:(?:hud\s+)?(?:context|status|history|packet|last|tools|continue)|git\s+(?:status|rev-parse))(?:\s|$)/i.test(command);
+}
+
+export async function continuation(project, limit = 10) {
+  const [git, currency] = await Promise.all([gitSnapshot(project.root), repositoryCurrency(project.root)]);
+  const state = readProjectState(project);
+  const runs = listRuns(project, limit).filter(meaningfulRun);
+  const recentEvidence = runs.map((record) => ({
+    runId: record.id, command: record.command, objective: record.objective,
+    status: record.status.toUpperCase(), cause: record.reduction?.cause || null,
+    classification: record.reduction?.classification || null,
+    evidence: classifyEvidence(record.currencyAfter, currency),
+  }));
+  const lastFailure = recentEvidence.find((item) => item.status !== 'PASS') || null;
+  const classifyWorking = (item) => item ? classifyEvidence(item.currency, currency) : null;
+  const counts = { current: 0, stale: 0, unknown: 0 };
+  for (const item of recentEvidence) counts[item.evidence.toLowerCase()]++;
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    project: { id: project.identity.id, root: project.root, branch: git.branch },
+    currency: { ...currency, dirty: git.dirty, changedFiles: git.changedFiles },
+    workingState: {
+      objective: state.objective ? { ...state.objective, evidence: classifyWorking(state.objective) } : null,
+      frontier: state.frontier ? { ...state.frontier, evidence: classifyWorking(state.frontier) } : null,
+    },
+    lastMeaningfulRun: recentEvidence[0] || null, lastFailure, recentEvidence, counts,
   };
 }
 
@@ -194,7 +281,7 @@ export function formatPacket(packet) {
 export async function runCommand(project, tokens, { objective, stream = true } = {}) {
   if (!tokens.length) throw new Error('hud run requires a command.');
   const command = tokens.map((token) => /[\s"']/.test(token) ? JSON.stringify(token) : token).join(' ');
-  const before = await gitSnapshot(project.root);
+  const [before, currencyBefore] = await Promise.all([gitSnapshot(project.root), repositoryCurrency(project.root)]);
   const id = createRunId();
   const runDirectory = join(project.store, 'runs', project.key, id);
   mkdirSync(dirname(runDirectory), { recursive: true });
@@ -221,7 +308,7 @@ export async function runCommand(project, tokens, { objective, stream = true } =
   });
   await Promise.all([new Promise((r) => stdoutFile.end(r)), new Promise((r) => stderrFile.end(r))]);
   const ended = new Date();
-  const after = await gitSnapshot(project.root);
+  const [after, currencyAfter] = await Promise.all([gitSnapshot(project.root), repositoryCurrency(project.root)]);
   const reduction = reduceOutput(command, stdout, stderr, exitCode);
   const missingCommand = exitCode !== 0 && /not found|not recognized|cannot find|ENOENT/i.test(`${stdout}\n${stderr}`);
   const record = {
@@ -232,20 +319,21 @@ export async function runCommand(project, tokens, { objective, stream = true } =
     exitCode, status: exitCode === 0 ? 'pass' : missingCommand ? 'blocked' : 'fail',
     dirtyBefore: before.dirty, dirtyAfter: after.dirty,
     changedFiles: after.changedFiles, gitBefore: before, gitAfter: after,
+    currencyBefore, currencyAfter,
     stdoutPath, stderrPath, reducer: reduction.reducer, reduction,
   };
   record.packet = buildPacket(record);
   writeFileSync(join(runDirectory, 'run.json'), `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx' });
-  const projectStateDirectory = join(project.store, 'projects', project.key);
-  mkdirSync(projectStateDirectory, { recursive: true });
-  writeFileSync(join(projectStateDirectory, 'state.json'), `${JSON.stringify({ schemaVersion: SCHEMA_VERSION, lastRunId: id }, null, 2)}\n`);
+  const state = readProjectState(project);
+  state.lastRunId = id;
+  writeProjectState(project, state);
   return record;
 }
 
 export function listRuns(project, limit = 10) {
   const root = join(project.store, 'runs', project.key);
   if (!existsSync(root)) return [];
-  const state = readJson(join(project.store, 'projects', project.key, 'state.json'));
+  const state = readProjectState(project);
   const ids = [];
   if (state?.lastRunId) ids.push(state.lastRunId);
   for (const id of readdirSync(root).sort().reverse()) if (!ids.includes(id)) ids.push(id);

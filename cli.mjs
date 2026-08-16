@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { formatPacket, resolveProject, gitSnapshot, discoverCommands, discoverTools, runCommand, lastRun, listRuns, fetchUpdate } from './core.mjs';
+import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, discoverCommands, discoverTools, runCommand, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, workingValue } from './core.mjs';
 
 function parse(argv) {
   const args = [...argv];
@@ -58,10 +58,44 @@ async function context(project, json) {
   console.log(`FRONTIER=${value.frontier}`);
 }
 
+function renderContinue(value) {
+  console.log('STATUS=PASS');
+  printObject({ project: value.project.id, root: value.project.root, branch: value.project.branch });
+  console.log('CURRENT');
+  printObject({ head: value.currency.head, worktree: value.currency.worktreeFingerprint, dirty: value.currency.dirty });
+  const objective = value.workingState.objective;
+  const frontier = value.workingState.frontier;
+  console.log(`OBJECTIVE=${objective?.value || 'none'}`);
+  if (objective) console.log(`OBJECTIVE_CURRENCY=${objective.evidence}`);
+  console.log(`FRONTIER=${frontier?.value || 'none'}`);
+  if (frontier) console.log(`FRONTIER_CURRENCY=${frontier.evidence}`);
+  if (value.lastMeaningfulRun) {
+    console.log('LAST_MEANINGFUL_RUN');
+    printObject(value.lastMeaningfulRun);
+  }
+  if (value.lastFailure) {
+    console.log('LAST_FAILURE');
+    printObject(value.lastFailure);
+  }
+  console.log('RECENT_EVIDENCE');
+  for (const item of value.recentEvidence) console.log(`${item.status} ${item.command} ${item.evidence}`);
+  printObject({ current_evidence: value.counts.current, stale_evidence: value.counts.stale, unknown_evidence: value.counts.unknown });
+}
+
 async function main() {
   const { command, args, options } = parse(process.argv.slice(2));
   const project = await resolveProject({ root: options.root });
   if (command === 'context' || command === 'status') return context(project, options.json);
+  if (command === 'continue') {
+    const value = await continuation(project);
+    return options.json ? console.log(JSON.stringify(value, null, 2)) : renderContinue(value);
+  }
+  if (command === 'objective' || command === 'frontier') {
+    if (args[0] === '--clear') setWorkingValue(project, command, null, await repositoryCurrency(project.root));
+    else if (args.length) setWorkingValue(project, command, args.join(' '), await repositoryCurrency(project.root));
+    const value = workingValue(project, command);
+    return options.json ? console.log(JSON.stringify(value, null, 2)) : console.log(`${command.toUpperCase()}=${value?.value || 'none'}`);
+  }
   if (command === 'tools') {
     const value = { tools: await discoverTools(), commands: discoverCommands(project.root) };
     return options.json ? console.log(JSON.stringify(value, null, 2)) : (console.log('TOOLS'), printObject(value.tools), console.log('PROJECT_COMMANDS'), value.commands.forEach((item) => console.log(`${item.name}=${item.command}`)));

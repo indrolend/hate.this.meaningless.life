@@ -18,6 +18,9 @@ Without linking, use `npm run hud -- <command>`.
 
 ```text
 hud context
+hud objective "Investigate Windows renderer regression"
+hud frontier "Rebuild and visually verify shadows"
+hud continue
 hud run --objective "Verify native gameplay" npm test
 hud packet --copy
 hud history
@@ -50,7 +53,9 @@ CommandHud/
       stderr.log
 ```
 
-Each `run.json` is created immutably. `state.json` is only the pointer to the most recent run. History is derived from run records; there is no parallel history database.
+Each `run.json` is created immutably and records repository currency before and after execution. `state.json` contains only the most recent run pointer plus the current objective and frontier. History is derived from run records; there is no parallel history database.
+
+`hud continue` compares durable evidence with the current HEAD and a content fingerprint of tracked and non-ignored untracked files. Evidence is `CURRENT`, `STALE`, or `UNKNOWN`; legacy records without currency remain readable and are classified `UNKNOWN`.
 
 Set `HUD_STATE_ROOT` to isolate state in tests or automation.
 
