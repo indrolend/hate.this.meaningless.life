@@ -399,7 +399,14 @@ function Start-Command {
 `$global:__CJ_EXIT = `$null
 try {
     `$__cj_live = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$encodedLivePath'))
-    & node '$hudCli' run $workflowArgs --request-b64 '$encodedRequest' pwsh.exe -NoProfile -NonInteractive -EncodedCommand '$encodedCommand' *>&1 | ForEach-Object {
+
+    & {
+        if ('$hudCli' -and (Test-Path -LiteralPath '$hudCli')) {
+            & node '$hudCli' run $workflowArgs --request-b64 '$encodedRequest' pwsh.exe -NoProfile -NonInteractive -EncodedCommand '$encodedCommand' *>&1
+        } else {
+            & pwsh.exe -NoProfile -NonInteractive -EncodedCommand '$encodedCommand' *>&1
+        }
+    } | ForEach-Object {
         `$__cj_line = (`$_ | Out-String -Width 240).TrimEnd()
         if (`$__cj_line) {
             try {
@@ -408,6 +415,7 @@ try {
         }
         `$_
     }
+
     `$global:__CJ_EXIT = if (`$null -ne `$global:LASTEXITCODE) { [int]`$global:LASTEXITCODE } else { 0 }
 } catch {
     `$global:__CJ_EXIT = 1
