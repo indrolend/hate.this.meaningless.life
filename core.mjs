@@ -223,25 +223,87 @@ function firstMatch(text, patterns) {
   return null;
 }
 
-export function reduceOutput(command, stdout, stderr, exitCode) {
-  const text = `${stdout}\n${stderr}`.trim();
+function decodePowerShellCliXml(value) {
+  const text = String(value || '');
+  if (!/<Objs\b[^>]*xmlns="http:\/\/schemas\.microsoft\.com\/powershell\/2004\/04"/i.test(text)) return text;
+
+  const decode = (part) => part
+    .replace(/_x([0-9A-Fa-f]{4})_/g, (_, hex) => String.fromCharCode(parseInt(hex, 16)))
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
+
+  const strings = [...text.matchAll(/<S(?:\s[^>]*)?>([\s\S]*?)<\/S>/gi)]
+    .map((match) => decode(match[1]));
+
+  return strings.length ? strings.join('\n') : decode(text.replace(/<[^>]+>/g, ''));
+}
+
+function normalizeTerminalText(value, root = '') {
+  let text = decodePowerShellCliXml(value)
+    .replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '')
+    .replace(/\r\n/g, '\n');
+
+  if (root) {
+    const escaped = root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    text = text.replace(new RegExp(escaped, 'gi'), '.');
+  }
+
+  const input = text.split('\n');
+  const output = [];
+  let skipPowerShellSourceLines = 0;
+
+  for (const line of input) {
+    const trimmed = line.trim();
+
+    if (/^At line:\d+ char:\d+$/i.test(trimmed)) {
+      output.push(trimmed);
+      skipPowerShellSourceLines = 2;
+      continue;
+    }
+
+    if (skipPowerShellSourceLines > 0 && /^\+/.test(trimmed)) {
+      skipPowerShellSourceLines--;
+      continue;
+    }
+
+    if (/^\+\s*CategoryInfo\s*:/i.test(trimmed)) continue;
+    if (/^\+\s*FullyQualifiedErrorId\s*:/i.test(trimmed)) continue;
+
+    if (!trimmed && output.at(-1) === '') continue;
+    output.push(line);
+  }
+
+  return output.join('\n').trim();
+}
+
+export function reduceOutput(command, stdout, stderr, exitCode, { root = '' } = {}) {
+  const text = normalizeTerminalText(`${stdout}\n${stderr}`, root);
   const summary = [];
+  const commandText = String(command || '');
+  const testCommand = /(?:^|\s)(?:ctest|npm(?:\.cmd)?\s+(?:run\s+)?(?:test|hud:test)|node(?:\.exe)?\s+[^\r\n]*run-native-tests|verify-gameplay)/i.test(commandText);
+  const auditCommand = /npm(?:\.cmd)?\s+audit/i.test(commandText);
+  const assetCommand = /verify_asset_mirrors\.py|npm(?:\.cmd)?\s+(?:run\s+)?assets/i.test(commandText);
+  const smokeCommand = /(?:smoke-test|desktop-smoke|room-smoke)/i.test(commandText);
+  const multiplayerCommand = /multiplayer|MULTIPLAYER_PROTOCOL/i.test(commandText);
   const ctest = text.match(/(\d+)% tests passed(?:,\s*(\d+) tests failed)? out of (\d+)/i);
-  if (ctest) {
+  if (ctest && testCommand) {
     const total = Number(ctest[3]);
     const failed = ctest[2] === undefined ? total - Math.round(total * Number(ctest[1]) / 100) : Number(ctest[2]);
     summary.push(`${total - failed}/${total} CTest`);
   }
   const nodeTests = text.match(/# tests (\d+)[\s\S]*?# pass (\d+)[\s\S]*?# fail (\d+)/i);
-  if (nodeTests) summary.push(`${nodeTests[2]}/${nodeTests[1]} node tests`);
+  if (nodeTests && testCommand) summary.push(`${nodeTests[2]}/${nodeTests[1]} node tests`);
   const vitest = text.match(/Test Files\s+(\d+) passed[\s\S]*?Tests\s+(\d+) passed/i);
-  if (vitest) summary.push(`${vitest[1]} Vitest files, ${vitest[2]} tests`);
-  if (/found 0 vulnerabilities/i.test(text)) summary.push('audit 0 vulnerabilities');
-  if (/ASSET_MIRRORS=PASS/i.test(text)) summary.push('asset mirrors');
-  if (/SMOKE_TEST_OK/i.test(text)) summary.push('smoke test');
-  if (/MULTIPLAYER_PROTOCOL_OK/i.test(text)) summary.push('multiplayer protocol');
+  if (vitest && testCommand) summary.push(`${vitest[1]} Vitest files, ${vitest[2]} tests`);
+  if (auditCommand && /found 0 vulnerabilities/i.test(text)) summary.push('audit 0 vulnerabilities');
+  if (assetCommand && /ASSET_MIRRORS=PASS/i.test(text)) summary.push('asset mirrors');
+  if (smokeCommand && /SMOKE_TEST_OK/i.test(text)) summary.push('smoke test');
+  if (multiplayerCommand && /MULTIPLAYER_PROTOCOL_OK/i.test(text)) summary.push('multiplayer protocol');
   const cause = exitCode === 0 ? null : firstMatch(text, [
-    /(?:fatal|error|failed|exception|not found|is not recognized|cannot find)[^\r\n]*/i,
+    /[^\r\n]*(?:fatal|error|failed|exception|not found|is not recognized|cannot find)[^\r\n]*/i,
     /[^\r\n]*(?:FAIL|FAILED)[^\r\n]*/i,
   ]);
   const classification = exitCode === 0 ? null
@@ -250,6 +312,34 @@ export function reduceOutput(command, stdout, stderr, exitCode) {
         : /compile|link|cmake|msbuild/i.test(cause || text) ? 'build' : 'command';
   const tail = text.split(/\r?\n/).filter(Boolean).slice(-8);
   return { reducer: /npm/.test(command) ? 'npm' : /ctest/.test(command) ? 'ctest' : 'generic', summary, cause, classification, tail };
+}
+
+export function buildPresentation(record) {
+  const summary = Array.isArray(record.reduction?.summary) ? record.reduction.summary.filter(Boolean) : [];
+  const tail = Array.isArray(record.reduction?.tail) ? record.reduction.tail.filter(Boolean) : [];
+  const cause = record.reduction?.cause || null;
+
+  let headline = null;
+  const details = [];
+
+  if (record.exitCode !== 0 && cause) {
+    headline = cause;
+  } else if (summary.length) {
+    headline = summary[0];
+    details.push(...summary.slice(1));
+  } else if (tail.length) {
+    headline = tail.at(-1);
+  }
+
+  return {
+    status: record.status,
+    request: record.request || record.objective || record.command,
+    headline,
+    details,
+    durationMs: record.durationMs,
+    exitCode: record.exitCode,
+    classification: record.reduction?.classification || null,
+  };
 }
 
 function createRunId(date = new Date()) {
@@ -263,7 +353,7 @@ export function buildPacket(record) {
   const verify = record.reduction.summary.length ? record.reduction.summary.join('; ') : `exit ${record.exitCode}`;
   const packet = {
     STATUS: status,
-    OBJECTIVE: record.objective || record.command,
+    OBJECTIVE: record.objective || record.request || record.command,
     AUTHORITY: `${record.gitAfter.head} branch=${record.gitAfter.branch} dirty=${record.gitAfter.dirty}`,
     CHANGE: change,
     VERIFY: verify,
@@ -278,7 +368,7 @@ export function formatPacket(packet) {
   return Object.entries(packet).map(([key, value]) => `${key}=${value}`).join('\n');
 }
 
-export async function runCommand(project, tokens, { objective, stream = true } = {}) {
+export async function runCommand(project, tokens, { objective, stream = true, request = null, workflow = null } = {}) {
   if (!tokens.length) throw new Error('hud run requires a command.');
   const command = tokens.map((token) => /[\s"']/.test(token) ? JSON.stringify(token) : token).join(' ');
   const [before, currencyBefore] = await Promise.all([gitSnapshot(project.root), repositoryCurrency(project.root)]);
@@ -309,12 +399,19 @@ export async function runCommand(project, tokens, { objective, stream = true } =
   await Promise.all([new Promise((r) => stdoutFile.end(r)), new Promise((r) => stderrFile.end(r))]);
   const ended = new Date();
   const [after, currencyAfter] = await Promise.all([gitSnapshot(project.root), repositoryCurrency(project.root)]);
-  const reduction = reduceOutput(command, stdout, stderr, exitCode);
-  const missingCommand = exitCode !== 0 && /not found|not recognized|cannot find|ENOENT/i.test(`${stdout}\n${stderr}`);
+  const reduction = reduceOutput(command, stdout, stderr, exitCode, { root: project.root });
+  const missingCommand = exitCode !== 0 && /(?:command not found|is not recognized as (?:a name of |the name of )?a? ?(?:cmdlet|function|script file|executable program)|ENOENT)/i.test(normalizeTerminalText(`${stdout}\n${stderr}`));
   const record = {
     schemaVersion: SCHEMA_VERSION, id, project: project.identity.id, root: project.root,
     branch: before.branch, headBefore: before.head, headAfter: after.head, upstream: before.upstream,
-    command, argv: tokens, cwd: project.root, objective: objective || null,
+    request: request || null, command, argv: tokens, cwd: project.root, objective: objective || null,
+    workflow: workflow ? {
+      id: workflow.id || null,
+      name: workflow.name || null,
+      stage: workflow.stage || null,
+      index: Number.isInteger(workflow.index) ? workflow.index : null,
+      count: Number.isInteger(workflow.count) ? workflow.count : null,
+    } : null,
     startedAt: started.toISOString(), endedAt: ended.toISOString(), durationMs: ended - started,
     exitCode, status: exitCode === 0 ? 'pass' : missingCommand ? 'blocked' : 'fail',
     dirtyBefore: before.dirty, dirtyAfter: after.dirty,
@@ -322,12 +419,146 @@ export async function runCommand(project, tokens, { objective, stream = true } =
     currencyBefore, currencyAfter,
     stdoutPath, stderrPath, reducer: reduction.reducer, reduction,
   };
+  record.presentation = buildPresentation(record);
   record.packet = buildPacket(record);
   writeFileSync(join(runDirectory, 'run.json'), `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx' });
   const state = readProjectState(project);
   state.lastRunId = id;
   writeProjectState(project, state);
   return record;
+}
+
+export function workflowView(project, workflowId, limit = 100) {
+  const runs = listRuns(project, limit)
+    .filter((run) => run.workflow?.id === workflowId)
+    .sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)));
+
+  if (!runs.length) return null;
+
+  const first = runs[0];
+  const latest = runs.at(-1);
+  const declaredCount = runs.find((run) => Number.isInteger(run.workflow?.count))?.workflow?.count ?? null;
+
+  const latestByStage = new Map();
+  const attemptsByStage = new Map();
+
+  for (const run of runs) {
+    const index = run.workflow?.index;
+    const key = Number.isInteger(index) ? `stage:${index}` : `run:${run.id}`;
+    latestByStage.set(key, run);
+    attemptsByStage.set(key, (attemptsByStage.get(key) || 0) + 1);
+  }
+
+  const stages = [...latestByStage.entries()]
+    .map(([key, run]) => ({
+      runId: run.id,
+      stage: run.workflow?.stage || 'unnamed',
+      index: run.workflow?.index ?? null,
+      count: run.workflow?.count ?? declaredCount,
+      status: run.status,
+      attempts: attemptsByStage.get(key) || 1,
+      durationMs: run.durationMs,
+      headline: run.presentation?.headline || run.reduction?.cause || null,
+      startedAt: run.startedAt,
+      evidenceCurrency: run.currencyAfter || null,
+    }))
+    .sort((a, b) => {
+      const ai = Number.isInteger(a.index) ? a.index : Number.MAX_SAFE_INTEGER;
+      const bi = Number.isInteger(b.index) ? b.index : Number.MAX_SAFE_INTEGER;
+      return ai - bi || String(a.startedAt).localeCompare(String(b.startedAt));
+    });
+
+  const passedIndexes = new Set(
+    stages
+      .filter((stage) => stage.status === 'pass' && Number.isInteger(stage.index))
+      .map((stage) => stage.index),
+  );
+
+  const unresolved = stages
+    .filter((stage) => stage.status === 'fail' || stage.status === 'blocked')
+    .sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)))
+    .at(-1) || null;
+
+  let nextStage = null;
+  if (Number.isInteger(declaredCount)) {
+    for (let index = 1; index <= declaredCount; index++) {
+      if (!passedIndexes.has(index)) {
+        nextStage = index;
+        break;
+      }
+    }
+  }
+
+  const pendingStages = Number.isInteger(declaredCount)
+    ? Array.from({ length: declaredCount }, (_, i) => i + 1)
+        .filter((index) => !stages.some((stage) => stage.index === index))
+    : [];
+
+  const completedStages = passedIndexes.size;
+  const status = unresolved
+    ? unresolved.status
+    : Number.isInteger(declaredCount) && completedStages < declaredCount
+      ? 'in_progress'
+      : 'pass';
+
+  return {
+    id: workflowId,
+    name: first.workflow?.name || workflowId,
+    stageCount: declaredCount,
+    completedStages,
+    currentStage: latest.workflow?.index ?? null,
+    nextStage,
+    pendingStages,
+    status,
+    stages,
+  };
+}
+
+export function buildWorkflowPacket(value) {
+  const byIndex = new Map(
+    value.stages
+      .filter((stage) => Number.isInteger(stage.index))
+      .map((stage) => [stage.index, stage]),
+  );
+
+  const lines = [
+    `WORKFLOW=${value.name}`,
+    `STATUS=${String(value.status).toUpperCase()}`,
+  ];
+
+  if (Number.isInteger(value.stageCount)) {
+    for (let index = 1; index <= value.stageCount; index++) {
+      const stage = byIndex.get(index);
+
+      if (!stage) {
+        lines.push(`STAGE_${index}=PENDING`);
+        continue;
+      }
+
+      const attempts = stage.attempts > 1 ? ` attempts=${stage.attempts}` : '';
+      lines.push(`STAGE_${index}=${stage.stage} ${String(stage.status).toUpperCase()}${attempts}`);
+    }
+  }
+
+  const unresolved = value.stages
+    .filter((stage) => stage.status === 'fail' || stage.status === 'blocked')
+    .sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)))
+    .at(-1);
+
+  if (unresolved?.headline) {
+    lines.push(`CAUSE=${unresolved.headline}`);
+  }
+
+  lines.push(`CURRENT=${value.currentStage ?? 'unknown'}/${value.stageCount ?? '?'}`);
+
+  if (value.nextStage !== null && value.nextStage !== undefined) {
+    const next = byIndex.get(value.nextStage);
+    lines.push(`NEXT=${value.nextStage}${next?.stage ? ` ${next.stage}` : ''}`);
+  } else {
+    lines.push('NEXT=none');
+  }
+
+  return lines.join('\n');
 }
 
 export function listRuns(project, limit = 10) {

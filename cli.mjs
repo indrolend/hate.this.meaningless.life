@@ -1,11 +1,11 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, discoverCommands, discoverTools, runCommand, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, workingValue } from './core.mjs';
+import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, discoverCommands, discoverTools, runCommand, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, workingValue, workflowView, buildWorkflowPacket } from './core.mjs';
 
 function parse(argv) {
   const args = [...argv];
-  const options = { copy: false, quiet: false, root: null, objective: null, json: false };
+  const options = { copy: false, quiet: false, root: null, objective: null, request: null, requestB64: null, workflowId: null, workflowName: null, stage: null, stageIndex: null, stageCount: null, json: false };
   const command = args.shift() || 'context';
   const positionals = [];
   for (let index = 0; index < args.length; index++) {
@@ -14,7 +14,13 @@ function parse(argv) {
     if (value === '--copy' || value === '--copy-packet') options.copy = true;
     else if (value === '--quiet') options.quiet = true;
     else if (value === '--json') options.json = true;
-    else if (value === '--root' || value === '--objective') options[value.slice(2)] = args[++index];
+    else if (value === '--root' || value === '--objective' || value === '--request') options[value.slice(2)] = args[++index];
+    else if (value === '--request-b64') options.requestB64 = args[++index];
+    else if (value === '--workflow-id') options.workflowId = args[++index];
+    else if (value === '--workflow-name') options.workflowName = args[++index];
+    else if (value === '--stage') options.stage = args[++index];
+    else if (value === '--stage-index') options.stageIndex = Number(args[++index]);
+    else if (value === '--stage-count') options.stageCount = Number(args[++index]);
     else if (command === 'run') { positionals.push(...args.slice(index)); break; }
     else positionals.push(value);
   }
@@ -101,12 +107,23 @@ async function main() {
     return options.json ? console.log(JSON.stringify(value, null, 2)) : (console.log('TOOLS'), printObject(value.tools), console.log('PROJECT_COMMANDS'), value.commands.forEach((item) => console.log(`${item.name}=${item.command}`)));
   }
   if (command === 'run') {
-    const record = await runCommand(project, args, { objective: options.objective, stream: !options.quiet });
+    const request = options.requestB64
+      ? Buffer.from(options.requestB64, 'base64').toString('utf16le')
+      : options.request;
+    const workflow = options.workflowId ? {
+      id: options.workflowId,
+      name: options.workflowName,
+      stage: options.stage,
+      index: Number.isInteger(options.stageIndex) ? options.stageIndex : null,
+      count: Number.isInteger(options.stageCount) ? options.stageCount : null,
+    } : null;
+    const record = await runCommand(project, args, { objective: options.objective, request, workflow, stream: !options.quiet });
     const packet = formatPacket(record.packet);
-    console.log(`\n${record.status.toUpperCase()} ${record.command} ${(record.durationMs / 1000).toFixed(1)}s`);
-    console.log(`HEAD ${record.headAfter.slice(0, 12)}`);
-    console.log(`DIRTY ${record.dirtyAfter ? 'dirty' : 'clean'}`);
-    for (const line of record.reduction.summary) console.log(line);
+    const view = record.presentation;
+    console.log(`\n${view.status.toUpperCase()} - ${(view.durationMs / 1000).toFixed(1)}s`);
+    console.log(view.request);
+    if (view.headline) console.log(view.headline);
+    for (const line of view.details) console.log(line);
     console.log('packet ready');
     console.log(packet);
     if (options.copy) copy(packet);
@@ -119,6 +136,17 @@ async function main() {
     if (command === 'last' && options.json) console.log(JSON.stringify(record, null, 2));
     else if (command === 'last') printObject({ id: record.id, status: record.status, command: record.command, exit_code: record.exitCode, stdout: record.stdoutPath, stderr: record.stderrPath });
     else { const packet = formatPacket(record.packet); console.log(packet); if (options.copy) copy(packet); }
+    return;
+  }
+  if (command === 'workflow') {
+    const id = args[0];
+    if (!id) throw new Error('hud workflow requires a workflow id.');
+    const value = workflowView(project, id);
+    if (!value) throw new Error(`No workflow records found for ${id}.`);
+    if (options.json) return console.log(JSON.stringify(value, null, 2));
+    const packet = buildWorkflowPacket(value);
+    console.log(packet);
+    if (options.copy) copy(packet);
     return;
   }
   if (command === 'history') {

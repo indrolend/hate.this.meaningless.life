@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildPacket, classifyEvidence, continuation, fetchUpdate, formatPacket, gitSnapshot, readProjectState, reduceOutput, repositoryCurrency, resolveProject, runCommand, setWorkingValue, workingValue } from './core.mjs';
+import { buildPacket, buildWorkflowPacket, classifyEvidence, continuation, fetchUpdate, formatPacket, gitSnapshot, readProjectState, reduceOutput, repositoryCurrency, resolveProject, runCommand, setWorkingValue, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -28,9 +28,92 @@ test('reducers retain concise evidence and cause classification', () => {
   const pass = reduceOutput('npm test', '100% tests passed, 0 tests failed out of 9', '', 0);
   assert.deepEqual(pass.summary, ['9/9 CTest']);
   const compactPass = reduceOutput('npm test', '100% tests passed out of 9\nMULTIPLAYER_PROTOCOL_OK', '', 0);
-  assert.deepEqual(compactPass.summary, ['9/9 CTest', 'multiplayer protocol']);
+  assert.deepEqual(compactPass.summary, ['9/9 CTest']);
   const fail = reduceOutput('npm test', '', 'Error: assertion failed', 1);
   assert.equal(fail.classification, 'test');
+});
+
+
+test('reducers do not infer verification from arbitrary printed source text', () => {
+  const printedSource = [
+    '100% tests passed, 0 tests failed out of 9',
+    'found 0 vulnerabilities',
+    'ASSET_MIRRORS=PASS count=7',
+    'SMOKE_TEST_OK',
+    'MULTIPLAYER_PROTOCOL_OK',
+  ].join('\n');
+  const value = reduceOutput('pwsh.exe -NoProfile -EncodedCommand abc', printedSource, '', 0);
+  assert.deepEqual(value.summary, []);
+});
+
+test('PowerShell unknown command is blocked but missing filesystem path is not', async () => {
+  const project = await fixtureProject();
+
+  const blocked = await runCommand(
+    project,
+    [process.execPath, '-e', `console.error("x: The term 'x' is not recognized as a name of a cmdlet, function, script file, or executable program."); process.exit(1)`],
+    { stream: false },
+  );
+  assert.equal(blocked.status, 'blocked');
+
+  const ordinaryFailure = await runCommand(
+    project,
+    [process.execPath, '-e', `console.error("Get-Item: Cannot find path 'C:\\missing' because it does not exist."); process.exit(1)`],
+    { stream: false },
+  );
+  assert.equal(ordinaryFailure.status, 'fail');
+});
+
+test('PowerShell CLIXML errors become ordinary readable text', () => {
+  const xml = '<Objs Version="1.1.0.1" xmlns="http://schemas.microsoft.com/powershell/2004/04"><S S="Error">_x001B_[31;1mGet-Item: _x001B_[31;1mCannot find path &apos;C:\\missing&apos; because it does not exist._x001B_[0m_x000D__x000A_</S></Objs>';
+  const value = reduceOutput('pwsh.exe', '', xml, 1);
+  assert.equal(value.cause, "Get-Item: Cannot find path 'C:\\missing' because it does not exist.");
+  assert.doesNotMatch(value.tail.join('\n'), /<Objs|_x001B_|xmlns=/);
+});
+
+test('terminal presentation strips ANSI, shortens repo roots, and removes PowerShell boilerplate', () => {
+  const value = reduceOutput(
+    'pwsh.exe',
+    '\x1b[31;1mFAIL\x1b[0m C:\\repo\\file.cpp\n',
+    [
+      'Thing failed',
+      'At line:1 char:12',
+      '+ bad command',
+      '+ ~~~~~~~~~~~',
+      '    + CategoryInfo          : NotSpecified: (...)',
+      '    + FullyQualifiedErrorId : NativeCommandError',
+    ].join('\n'),
+    1,
+    { root: 'C:\\repo' },
+  );
+
+  assert.equal(value.cause, 'Thing failed');
+  assert.match(value.tail.join('\n'), /FAIL \.\\file\.cpp/);
+  assert.match(value.tail.join('\n'), /At line:1 char:12/);
+  assert.doesNotMatch(value.tail.join('\n'), /CategoryInfo|FullyQualifiedErrorId|\x1b/);
+});
+
+test('reducers accept evidence from matching authoritative commands', () => {
+  assert.deepEqual(
+    reduceOutput('ctest --output-on-failure', '100% tests passed, 0 tests failed out of 9', '', 0).summary,
+    ['9/9 CTest'],
+  );
+  assert.deepEqual(
+    reduceOutput('python tools/verify_asset_mirrors.py', 'ASSET_MIRRORS=PASS count=7', '', 0).summary,
+    ['asset mirrors'],
+  );
+});
+
+test('run records preserve human request separately from transport', async () => {
+  const project = await fixtureProject();
+  const record = await runCommand(
+    project,
+    [process.execPath, '-e', 'console.log("transport ok")'],
+    { request: 'show simple result', stream: false },
+  );
+  assert.equal(record.request, 'show simple result');
+  assert.match(record.command, /node|process/i);
+  assert.equal(record.packet.OBJECTIVE, 'show simple result');
 });
 
 test('verified project execution persists immutable evidence and packet', async () => {
@@ -72,6 +155,149 @@ test('update comparison uses canonical manifest commit and platform artifact', a
   execFileSync('git', ['commit', '-m', 'local ahead'], { cwd: root });
   const ahead = await fetchUpdate(project, async () => response);
   assert.equal(ahead.status, 'local_ahead');
+});
+
+test('presentation exposes semantic result without transport noise', async () => {
+  const project = await fixtureProject();
+
+  const pass = await runCommand(
+    project,
+    [process.execPath, '-e', 'console.log("VISIBLE_RESULT")'],
+    { request: 'simple human request', stream: false },
+  );
+
+  assert.equal(pass.presentation.status, 'pass');
+  assert.equal(pass.presentation.request, 'simple human request');
+  assert.equal(pass.presentation.headline, 'VISIBLE_RESULT');
+  assert.doesNotMatch(pass.presentation.request, /EncodedCommand|node\.exe/i);
+
+  const fail = await runCommand(
+    project,
+    [process.execPath, '-e', 'console.error("Error: compact failure"); process.exit(3)'],
+    { request: 'failing human request', stream: false },
+  );
+
+  assert.equal(fail.presentation.status, 'fail');
+  assert.equal(fail.presentation.request, 'failing human request');
+  assert.equal(fail.presentation.headline, 'Error: compact failure');
+  assert.equal(fail.presentation.exitCode, 3);
+});
+
+test('workflow view is derived from immutable run records', async () => {
+  const project = await fixtureProject();
+
+  await runCommand(
+    project,
+    [process.execPath, '-e', 'console.log("inspect ok")'],
+    {
+      request: 'inspect',
+      workflow: { id: 'wf-1', name: 'verify current change', stage: 'inspect', index: 1, count: 3 },
+      stream: false,
+    },
+  );
+
+  await runCommand(
+    project,
+    [process.execPath, '-e', 'console.error("AssertionError: stage failed"); process.exit(1)'],
+    {
+      request: 'test',
+      workflow: { id: 'wf-1', name: 'verify current change', stage: 'test', index: 2, count: 3 },
+      stream: false,
+    },
+  );
+
+  const value = workflowView(project, 'wf-1');
+  assert.equal(value.name, 'verify current change');
+  assert.equal(value.stageCount, 3);
+  assert.equal(value.currentStage, 2);
+  assert.equal(value.status, 'fail');
+  assert.deepEqual(value.stages.map((stage) => stage.stage), ['inspect', 'test']);
+  assert.match(value.stages[1].headline, /AssertionError/);
+});
+
+test('workflow view resolves retries from latest immutable stage attempts', async () => {
+  const project = await fixtureProject();
+
+  await runCommand(
+    project,
+    [process.execPath, '-e', 'console.log("inspect ok")'],
+    {
+      request: 'inspect',
+      workflow: { id: 'wf-retry', name: 'retry workflow', stage: 'inspect', index: 1, count: 3 },
+      stream: false,
+    },
+  );
+
+  await runCommand(
+    project,
+    [process.execPath, '-e', 'console.error("AssertionError: first attempt failed"); process.exit(1)'],
+    {
+      request: 'test',
+      workflow: { id: 'wf-retry', name: 'retry workflow', stage: 'test', index: 2, count: 3 },
+      stream: false,
+    },
+  );
+
+  let value = workflowView(project, 'wf-retry');
+  assert.equal(value.status, 'fail');
+  assert.equal(value.nextStage, 2);
+  assert.deepEqual(value.pendingStages, [3]);
+
+  await runCommand(
+    project,
+    [process.execPath, '-e', 'console.log("test repaired")'],
+    {
+      request: 'retry test',
+      workflow: { id: 'wf-retry', name: 'retry workflow', stage: 'test', index: 2, count: 3 },
+      stream: false,
+    },
+  );
+
+  value = workflowView(project, 'wf-retry');
+
+  assert.equal(value.status, 'in_progress');
+  assert.equal(value.currentStage, 2);
+  assert.equal(value.nextStage, 3);
+  assert.deepEqual(value.pendingStages, [3]);
+  assert.equal(value.completedStages, 2);
+  assert.deepEqual(value.stages.map((stage) => stage.status), ['pass', 'pass']);
+  assert.equal(value.stages[1].attempts, 2);
+});
+
+test('workflow packet is compact and represents pending and retried stages', () => {
+  const packet = buildWorkflowPacket({
+    name: 'verify current change',
+    status: 'in_progress',
+    stageCount: 3,
+    currentStage: 2,
+    nextStage: 3,
+    stages: [
+      {
+        index: 1,
+        stage: 'inspect',
+        status: 'pass',
+        attempts: 1,
+        startedAt: '2026-01-01T00:00:00Z',
+      },
+      {
+        index: 2,
+        stage: 'test',
+        status: 'pass',
+        attempts: 2,
+        startedAt: '2026-01-01T00:01:00Z',
+      },
+    ],
+  });
+
+  assert.equal(packet, [
+    'WORKFLOW=verify current change',
+    'STATUS=IN_PROGRESS',
+    'STAGE_1=inspect PASS',
+    'STAGE_2=test PASS attempts=2',
+    'STAGE_3=PENDING',
+    'CURRENT=2/3',
+    'NEXT=3',
+  ].join('\n'));
 });
 
 test('packet schema contains only deterministic continuation fields', () => {
