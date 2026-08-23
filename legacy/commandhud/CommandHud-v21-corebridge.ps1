@@ -390,7 +390,8 @@ function Start-Command {
     $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $encodedRequest = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($request))
     $encodedLivePath = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:ActiveLivePath))
-    $hudCli = 'C:\Users\indro\Documents\Codex\2026-08-20\review-github-pr-52-in-indrolend\work\digital-breakdown-apk\tools\hud\cli.mjs'
+    $gitRoot = (& git -C $directory rev-parse --show-toplevel 2>$null | Out-String).Trim()
+    $hudCli = if ($gitRoot) { Join-Path $gitRoot 'tools\hud\cli.mjs' } else { $null }
 
     $script:HudCli = $hudCli
     $wrapper = @"
