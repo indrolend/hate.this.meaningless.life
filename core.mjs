@@ -268,18 +268,22 @@ export async function continuation(project, limit = 10) {
   };
 }
 
-export function discoverCommands(root) {
+function repositoryCommandDefinitions(root) {
   const commands = [];
   const packageJson = readJson(join(root, 'package.json'));
-  for (const name of Object.keys(packageJson?.scripts || {}).sort()) commands.push({ name: `npm:${name}`, command: `npm run ${name}` });
+  for (const name of Object.keys(packageJson?.scripts || {}).sort()) commands.push({ name: `npm:${name}`, command: `npm run ${name}`, argv: ['npm', 'run', name] });
   const adapters = [
-    ['assets', 'python tools/verify_asset_mirrors.py', 'tools/verify_asset_mirrors.py'],
-    ['native-tests', 'node tools/run-native-tests.mjs', 'tools/run-native-tests.mjs'],
-    ['multiplayer', 'npm --prefix multiplayer-server run check', 'multiplayer-server/package.json'],
-    ['multiplayer-dry-deploy', 'npm --prefix multiplayer-server run deploy:dry', 'multiplayer-server/package.json'],
+    ['assets', 'python tools/verify_asset_mirrors.py', ['python', 'tools/verify_asset_mirrors.py'], 'tools/verify_asset_mirrors.py'],
+    ['native-tests', 'node tools/run-native-tests.mjs', ['node', 'tools/run-native-tests.mjs'], 'tools/run-native-tests.mjs'],
+    ['multiplayer', 'npm --prefix multiplayer-server run check', ['npm', '--prefix', 'multiplayer-server', 'run', 'check'], 'multiplayer-server/package.json'],
+    ['multiplayer-dry-deploy', 'npm --prefix multiplayer-server run deploy:dry', ['npm', '--prefix', 'multiplayer-server', 'run', 'deploy:dry'], 'multiplayer-server/package.json'],
   ];
-  for (const [name, command, owner] of adapters) if (existsSync(join(root, owner))) commands.push({ name, command });
+  for (const [name, command, argv, owner] of adapters) if (existsSync(join(root, owner))) commands.push({ name, command, argv });
   return commands;
+}
+
+export function discoverCommands(root) {
+  return repositoryCommandDefinitions(root).map(({ name, command }) => ({ name, command }));
 }
 
 async function versionOf(command, args = ['--version']) {
@@ -365,7 +369,7 @@ export function reduceOutput(command, stdout, stderr, exitCode, { root = '' } = 
   const text = normalizeTerminalText(`${stdout}\n${stderr}`, root);
   const summary = [];
   const commandText = String(command || '');
-  const testCommand = /(?:^|\s)(?:ctest|npm(?:\.cmd)?\s+(?:run\s+)?(?:test|hud:test)|node(?:\.exe)?\s+[^\r\n]*run-native-tests|verify-gameplay)/i.test(commandText);
+  const testCommand = /(?:^|[\s"])(?:ctest|npm(?:\.cmd)?\s+(?:run\s+)?(?:test|hud:test)|node(?:\.exe)?\s+[^\r\n]*run-native-tests|verify-gameplay)/i.test(commandText);
   const auditCommand = /npm(?:\.cmd)?\s+audit/i.test(commandText);
   const assetCommand = /verify_asset_mirrors\.py|npm(?:\.cmd)?\s+(?:run\s+)?assets/i.test(commandText);
   const smokeCommand = /(?:smoke-test|desktop-smoke|room-smoke)/i.test(commandText);
@@ -376,7 +380,7 @@ export function reduceOutput(command, stdout, stderr, exitCode, { root = '' } = 
     const failed = ctest[2] === undefined ? total - Math.round(total * Number(ctest[1]) / 100) : Number(ctest[2]);
     summary.push(`${total - failed}/${total} CTest`);
   }
-  const nodeTests = text.match(/# tests (\d+)[\s\S]*?# pass (\d+)[\s\S]*?# fail (\d+)/i);
+  const nodeTests = text.match(/(?:#|ℹ)\s*tests (\d+)[\s\S]*?(?:#|ℹ)\s*pass (\d+)[\s\S]*?(?:#|ℹ)\s*fail (\d+)/i);
   if (nodeTests && testCommand) summary.push(`${nodeTests[2]}/${nodeTests[1]} node tests`);
   const vitest = text.match(/Test Files\s+(\d+) passed[\s\S]*?Tests\s+(\d+) passed/i);
   if (vitest && testCommand) summary.push(`${vitest[1]} Vitest files, ${vitest[2]} tests`);
@@ -574,6 +578,30 @@ export async function searchRepository(project, query, scope = '.', { stream = f
   });
 }
 
+export async function runRepositoryCommand(project, name, { stream = false } = {}) {
+  const selected = repositoryCommandDefinitions(project.root).find((command) => command.name === String(name || ''));
+  if (!selected) throw new Error(`Unknown repository command: ${name}`);
+  let argv = [...selected.argv];
+  if (process.platform === 'win32' && argv[0] === 'npm') {
+    if (argv.slice(1).some((argument) => !/^[A-Za-z0-9:._/-]+$/.test(argument))) {
+      throw new Error(`Repository npm command has an unsupported Windows argument: ${selected.name}`);
+    }
+    argv = [process.env.ComSpec || 'cmd.exe', '/d', '/s', '/c', `npm.cmd ${argv.slice(1).join(' ')}`];
+  }
+  return runCommand(project, argv, {
+    request: `run repository command ${selected.name}`,
+    objective: `Run ${selected.command}`,
+    stream,
+    shell: false,
+    operationReducer: ({ exitCode, command, record }) => ({
+      type: 'repository-command', name: selected.name,
+      displayCommand: selected.command, command, exitCode,
+      status: record.status, durationMs: record.durationMs,
+      summary: [...record.reduction.summary],
+    }),
+  });
+}
+
 export function buildOperationHandoff(project, record) {
   if (!record?.operation) throw new Error('The last run has no structured operation to hand off.');
   const operation = record.operation;
@@ -590,6 +618,11 @@ export function buildOperationHandoff(project, record) {
     lines.push(`RESULT ${operation.matchCount} matches / ${operation.fileCount} files`);
     lines.push('', 'FILES');
     for (const file of operation.files) lines.push(`${file.path} ${file.count} lines=${file.lines.join(',')}`);
+  } else if (operation.type === 'repository-command') {
+    lines.push(`NAME ${operation.name}`);
+    lines.push(`COMMAND ${operation.command}`);
+    lines.push(`RESULT ${operation.status.toUpperCase()} exit=${operation.exitCode} duration=${operation.durationMs}ms`);
+    if (operation.summary.length) lines.push(`SUMMARY ${operation.summary.join('; ')}`);
   }
   lines.push('', `RAW run:${record.id}`, `STDOUT ${record.stdoutPath}`, `STDERR ${record.stderrPath}`);
   return lines.join('\n');

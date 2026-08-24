@@ -11,6 +11,7 @@ function fixtureProject() {
   const root = mkdtempSync(join(tmpdir(), 'hud-server-'));
   mkdirSync(join(root, 'distribution'));
   mkdirSync(join(root, 'media'));
+  mkdirSync(join(root, 'tools'));
   writeFileSync(join(root, 'distribution', 'project.json'), JSON.stringify({
     id: 'indrolend/data',
     channel: 'test',
@@ -20,6 +21,7 @@ function fixtureProject() {
   writeFileSync(join(root, 'media', 'tone.wav'), Buffer.from('RIFFtestWAVE'));
   writeFileSync(join(root, 'media', 'clip.mp4'), Buffer.from('test-mp4'));
   writeFileSync(join(root, 'media', 'clip.mov'), Buffer.from('test-mov'));
+  writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'console.log("100% tests passed, 0 tests failed out of 2")\n');
   execFileSync('git', ['init', '-b', 'main'], { cwd: root });
   execFileSync('git', ['config', 'user.email', 'hud@example.invalid'], { cwd: root });
   execFileSync('git', ['config', 'user.name', 'HUD Test'], { cwd: root });
@@ -31,7 +33,7 @@ function fixtureProject() {
   });
 }
 
-test('HUD server exposes live reads, typed Search, and byte-range media without arbitrary execution', async (t) => {
+test('HUD server exposes live reads, typed operations, and byte-range media without arbitrary execution', async (t) => {
   const project = await fixtureProject();
   await searchRepository(project, 'RIFF', 'media');
   const running = await startHudServer(project, { port: 0 });
@@ -73,7 +75,7 @@ test('HUD server exposes live reads, typed Search, and byte-range media without 
 
   const treeResponse = await fetch(`${base}/tree`);
   assert.equal(treeResponse.status, 200);
-  assert.equal((await treeResponse.json()).fileCount, 5);
+  assert.equal((await treeResponse.json()).fileCount, 6);
 
   const indexResponse = await fetch(`${base}/`);
   assert.equal(indexResponse.status, 200);
@@ -143,4 +145,26 @@ test('HUD server exposes live reads, typed Search, and byte-range media without 
   });
   assert.equal(crossOrigin.status, 403);
   assert.equal((await (await fetch(`${base}/state`)).json()).last.runId, runBeforeInvalid);
+
+  const commandResponse = await fetch(`${base}/operations/repository-command`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name: 'native-tests' }),
+  });
+  assert.equal(commandResponse.status, 200);
+  const command = await commandResponse.json();
+  assert.equal(command.status, 'pass');
+  assert.equal(command.operation.type, 'repository-command');
+  assert.equal(command.operation.name, 'native-tests');
+  assert.deepEqual(command.operation.summary, ['2/2 CTest']);
+  assert.equal(command.state.last.runId, command.runId);
+  assert.deepEqual(command.state.lastOperation, command.operation);
+
+  const commandRunId = command.runId;
+  for (const body of [{ name: '' }, { name: 'not-declared' }, { name: 'native-tests', command: 'powershell' }]) {
+    const invalid = await fetch(`${base}/operations/repository-command`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    assert.equal(invalid.status, 400);
+  }
+  assert.equal((await (await fetch(`${base}/state`)).json()).last.runId, commandRunId);
 });

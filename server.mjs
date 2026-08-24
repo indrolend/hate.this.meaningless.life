@@ -2,7 +2,7 @@ import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildOperationHandoff, classifyEvidence, currentState, lastRun, repositoryCurrency, repositoryTree, searchRepository } from './core.mjs';
+import { buildOperationHandoff, classifyEvidence, currentState, lastRun, repositoryCurrency, repositoryTree, runRepositoryCommand, searchRepository } from './core.mjs';
 
 const staticRoot = join(dirname(fileURLToPath(import.meta.url)), 'visual-prototype');
 const contentTypes = {
@@ -46,6 +46,14 @@ function searchRequest(value) {
   if (typeof value.query !== 'string' || !value.query.trim() || value.query.length > 500) throw Object.assign(new Error('Search query must be 1-500 characters.'), { statusCode: 400 });
   if (value.scope !== undefined && (typeof value.scope !== 'string' || !value.scope || value.scope.length > 500)) throw Object.assign(new Error('Search scope must be a repository-relative string.'), { statusCode: 400 });
   return { query: value.query, scope: value.scope || '.' };
+}
+
+function repositoryCommandRequest(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('Repository command request must be an object.'), { statusCode: 400 });
+  const unknown = Object.keys(value).filter((key) => key !== 'name');
+  if (unknown.length) throw Object.assign(new Error(`Unsupported repository command fields: ${unknown.join(', ')}`), { statusCode: 400 });
+  if (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 200) throw Object.assign(new Error('Repository command name must be 1-200 characters.'), { statusCode: 400 });
+  return { name: value.name };
 }
 
 function validateOperationRequest(request) {
@@ -159,8 +167,27 @@ export function createHudServer(project) {
         });
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/operations/repository-command') {
+        validateOperationRequest(request);
+        const operation = repositoryCommandRequest(await jsonBody(request));
+        let record;
+        try { record = await runRepositoryCommand(project, operation.name); }
+        catch (error) {
+          if (/^Unknown repository command:/.test(error.message)) error.statusCode = 400;
+          throw error;
+        }
+        json(response, 200, {
+          runId: record.id,
+          status: record.status,
+          operation: record.operation,
+          presentation: record.presentation,
+          evidence: { stdout: record.stdoutPath, stderr: record.stderrPath },
+          state: await currentState(project),
+        });
+        return;
+      }
       if (!['GET', 'HEAD'].includes(request.method)) {
-        json(response, 405, { error: 'Only the typed Search operation accepts local mutation requests.' });
+        json(response, 405, { error: 'Only typed CommandHUD operations accept local mutation requests.' });
         return;
       }
       if (url.pathname === '/state' || url.pathname === '/visual-state') {

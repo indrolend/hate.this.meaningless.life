@@ -67,6 +67,7 @@
     entry.name.startsWith('npm:') ? 'Script declared by this repository.' : 'Command adapter discovered in this repository.',
     entry.command,
     entry.name.startsWith('npm:') ? 'package script' : 'repository tool',
+    entry.name,
   ]);
 
   function indexDirectory(directory) {
@@ -504,6 +505,8 @@
       copied = true;
     } catch {}
     output.classList.add('open');
+    $('#outputActions').replaceChildren();
+    $('#outputActions').classList.remove('open');
     $('#outputTitle').textContent = 'Exact command';
     $('#outputText').textContent = `$ ${command}\n\n${copied ? 'Copied to the clipboard.' : 'Ready to copy.'}\nThis static browser client does not execute host shell commands.`;
     $('#outputResults').replaceChildren();
@@ -512,6 +515,8 @@
   async function copyHandoff() {
     if (!liveState) return stageCommand('node tools/hud/cli.mjs handoff --copy');
     output.classList.add('open');
+    $('#outputActions').replaceChildren();
+    $('#outputActions').classList.remove('open');
     $('#outputTitle').textContent = 'Compact operation handoff';
     $('#outputText').textContent = 'Loading the last structured operation…';
     $('#outputResults').replaceChildren();
@@ -552,6 +557,8 @@
 
   async function executeSearch(operation) {
     output.classList.add('open');
+    $('#outputActions').replaceChildren();
+    $('#outputActions').classList.remove('open');
     $('#outputTitle').textContent = 'Search running';
     $('#outputText').textContent = `SEARCH\nQUERY ${operation.query}\nSCOPE ${operation.scope}\n\nWaiting for the local runtime…`;
     $('.run').disabled = true;
@@ -570,6 +577,65 @@
       $('#outputTitle').textContent = 'Search rejected';
       $('#outputText').textContent = error.message;
       $('.run').disabled = false;
+    }
+  }
+
+  function outputAction(label, className, handler) {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = className;
+    button.textContent = label;
+    button.onclick = handler;
+    return button;
+  }
+
+  function confirmRepositoryCommand(command) {
+    if (inputMode === 'search') exitSearchMode();
+    input.value = command[2];
+    togglePicker(false);
+    previewInput();
+    if (!liveState) return stageCommand(command[2]);
+    output.classList.add('open');
+    $('#outputTitle').textContent = 'Confirm repository command';
+    $('#outputText').textContent = `${command[0]}\n${command[2]}\n\nThis command is declared by the repository and can execute arbitrary local code.`;
+    $('#outputResults').replaceChildren();
+    const actions = $('#outputActions');
+    actions.replaceChildren(
+      outputAction('Cancel', '', () => output.classList.remove('open')),
+      outputAction('Run', 'confirm', () => executeRepositoryCommand(command[4])),
+    );
+    actions.classList.add('open');
+  }
+
+  async function executeRepositoryCommand(name) {
+    const actions = $('#outputActions');
+    actions.replaceChildren();
+    actions.classList.remove('open');
+    $('#outputTitle').textContent = 'Repository command running';
+    $('#outputText').textContent = `${name}\n\nWaiting for the local runtime…`;
+    try {
+      const response = await fetch('/operations/repository-command', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || `Repository command failed with HTTP ${response.status}.`);
+      state = result.state;
+      const summary = result.operation.summary.length ? result.operation.summary.join('; ') : `exit ${result.operation.exitCode}`;
+      $('#outputTitle').textContent = `${result.operation.name} ${result.status}`;
+      $('#outputText').textContent = `${result.operation.command}\n\n${summary}\n${(result.operation.durationMs / 1000).toFixed(1)}s\nRaw evidence: run:${result.runId}`;
+      $('#snapshotState').textContent = state.git.head.slice(0, 7);
+      $('#snapshotState').className = state.git.dirty ? 'warn' : 'good';
+      $('#changeCount').textContent = String(state.git.changedFiles.length);
+      $('#changeCount').className = state.git.changedFiles.length ? 'warn' : 'good';
+      $('#searchState').textContent = 'none';
+      $('#searchState').className = '';
+      document.querySelectorAll('.search-match').forEach((element) => element.classList.remove('search-match'));
+      actions.replaceChildren(outputAction('Copy handoff', 'confirm', copyHandoff));
+      actions.classList.add('open');
+    } catch (error) {
+      $('#outputTitle').textContent = 'Repository command rejected';
+      $('#outputText').textContent = error.message;
     }
   }
 
@@ -693,6 +759,10 @@
     if (chosen[0] === 'Search repository' || chosen[0] === 'Search current directory') {
       togglePicker(false);
       enterSearchMode(chosen[0] === 'Search current directory' ? '{current}' : '.');
+      return;
+    }
+    if (category === 'Library') {
+      confirmRepositoryCommand(chosen);
       return;
     }
     input.value = resolved(chosen[2]);

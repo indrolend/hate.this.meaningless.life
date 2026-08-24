@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, searchRepository, buildOperationHandoff, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildOperationHandoff, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 function parse(argv) {
   const args = [...argv];
@@ -158,6 +158,29 @@ async function main() {
       console.log(`MATCHES ${result.matchCount}`);
       console.log(`FILES ${result.fileCount}`);
       for (const file of result.files) console.log(`${file.path} ${file.count} lines=${file.lines.join(',')}`);
+      console.log(`RAW run:${record.id}`);
+    }
+    process.exitCode = record.status === 'pass' ? 0 : record.status === 'blocked' ? 2 : 1;
+    return;
+  }
+  if (command === 'repository-command') {
+    const name = args[0];
+    if (!name) throw new Error('hud repository-command requires a discovered command name.');
+    const record = await runRepositoryCommand(project, name, { stream: !options.quiet });
+    if (options.json) {
+      console.log(JSON.stringify({
+        runId: record.id, status: record.status, operation: record.operation,
+        presentation: record.presentation,
+        stdoutPath: record.stdoutPath, stderrPath: record.stderrPath,
+        currency: record.currencyAfter,
+      }, null, 2));
+    } else {
+      const result = record.operation;
+      console.log(`REPOSITORY_COMMAND ${result.name}`);
+      console.log(`COMMAND ${result.command}`);
+      console.log(`STATUS ${result.status.toUpperCase()}`);
+      console.log(`DURATION ${result.durationMs}ms`);
+      if (result.summary.length) console.log(`SUMMARY ${result.summary.join('; ')}`);
       console.log(`RAW run:${record.id}`);
     }
     process.exitCode = record.status === 'pass' ? 0 : record.status === 'blocked' ? 2 : 1;

@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, discoverCommands, fetchUpdate, formatPacket, gitSnapshot, parseSearchOutput, readProjectState, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runCommand, searchRepository, setWorkingValue, workingValue, workflowView } from './core.mjs';
+import { buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, discoverCommands, fetchUpdate, formatPacket, gitSnapshot, parseSearchOutput, readProjectState, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runCommand, runRepositoryCommand, searchRepository, setWorkingValue, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -36,11 +36,36 @@ test('repository command discovery derives a deterministic inspectable library',
   ]);
 });
 
+test('repository command execution resolves a current discovered identity and records evidence', async () => {
+  const root = fixture();
+  mkdirSync(join(root, 'tools'));
+  writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'console.log("100% tests passed, 0 tests failed out of 3")\n');
+  execFileSync('git', ['add', 'tools/run-native-tests.mjs'], { cwd: root });
+  execFileSync('git', ['commit', '-m', 'add command fixture'], { cwd: root });
+  const project = await resolveProject({ cwd: root, env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'hud-command-state-')) } });
+
+  const record = await runRepositoryCommand(project, 'native-tests');
+  assert.equal(record.status, 'pass');
+  assert.equal(record.operation.type, 'repository-command');
+  assert.equal(record.operation.name, 'native-tests');
+  assert.equal(record.operation.displayCommand, 'node tools/run-native-tests.mjs');
+  assert.equal(record.operation.command, 'node tools/run-native-tests.mjs');
+  assert.deepEqual(record.operation.summary, ['3/3 CTest']);
+  assert.match(readFileSync(record.stdoutPath, 'utf8'), /100% tests passed/);
+  assert.equal(readFileSync(record.stderrPath, 'utf8'), '');
+  assert.match(buildOperationHandoff(project, record), new RegExp(`RAW run:${record.id}`));
+
+  await assert.rejects(() => runRepositoryCommand(project, 'not-declared'), /Unknown repository command/);
+  assert.equal(readProjectState(project).lastRunId, record.id);
+});
+
 test('reducers retain concise evidence and cause classification', () => {
   const pass = reduceOutput('npm test', '100% tests passed, 0 tests failed out of 9', '', 0);
   assert.deepEqual(pass.summary, ['9/9 CTest']);
   const compactPass = reduceOutput('npm test', '100% tests passed out of 9\nMULTIPLAYER_PROTOCOL_OK', '', 0);
   assert.deepEqual(compactPass.summary, ['9/9 CTest']);
+  const modernNodePass = reduceOutput('cmd.exe /d /s /c "npm.cmd run hud:test"', 'ℹ tests 28\nℹ pass 28\nℹ fail 0', '', 0);
+  assert.deepEqual(modernNodePass.summary, ['28/28 node tests']);
   const fail = reduceOutput('npm test', '', 'Error: assertion failed', 1);
   assert.equal(fail.classification, 'test');
 });
