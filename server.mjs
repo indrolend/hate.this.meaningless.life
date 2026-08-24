@@ -1,8 +1,8 @@
-import { createReadStream, existsSync, statSync } from 'node:fs';
+import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { currentState, repositoryTree, searchRepository } from './core.mjs';
+import { classifyEvidence, currentState, lastRun, repositoryCurrency, repositoryTree, searchRepository } from './core.mjs';
 
 const staticRoot = join(dirname(fileURLToPath(import.meta.url)), 'visual-prototype');
 const contentTypes = {
@@ -66,6 +66,36 @@ function projectedPaths(directory, result = new Set()) {
   for (const file of directory.files) result.add(file.path);
   for (const child of directory.directories) projectedPaths(child, result);
   return result;
+}
+
+async function sourceExcerpt(project, requested, context = 2) {
+  const path = String(requested || '').replaceAll('\\', '/');
+  const tree = await repositoryTree(project.root);
+  if (!path || !projectedPaths(tree.root).has(path)) throw Object.assign(new Error('Source file is not in the current repository projection.'), { statusCode: 404 });
+  const record = lastRun(project);
+  const match = record?.operation?.type === 'search' ? record.operation.files.find((file) => file.path === path) : null;
+  if (!match) throw Object.assign(new Error('Source excerpts require a matching file from the latest Search operation.'), { statusCode: 409 });
+  const radius = Number(context);
+  if (!Number.isInteger(radius) || radius < 0 || radius > 10) throw Object.assign(new Error('Source context must be an integer from 0 to 10.'), { statusCode: 400 });
+  const target = resolve(project.root, ...path.split('/'));
+  const metadata = statSync(target);
+  if (!metadata.isFile() || metadata.size > 1024 * 1024) throw Object.assign(new Error('Source preview supports files up to 1 MiB.'), { statusCode: 413 });
+  const content = readFileSync(target, 'utf8');
+  if (content.includes('\0')) throw Object.assign(new Error('Binary files cannot be displayed as source.'), { statusCode: 415 });
+  const lines = content.split(/\r?\n/);
+  const excerpts = match.lines.map((line) => {
+    const startLine = Math.max(1, line - radius);
+    const endLine = Math.min(lines.length, line + radius);
+    return {
+      matchLine: line, startLine, endLine,
+      lines: lines.slice(startLine - 1, endLine).map((text, index) => ({ number: startLine + index, text, match: startLine + index === line })),
+    };
+  });
+  return {
+    path, query: record.operation.query, runId: record.id,
+    evidence: classifyEvidence(record.currencyAfter, await repositoryCurrency(project.root)),
+    excerpts,
+  };
 }
 
 function safeStaticPath(pathname) {
@@ -139,6 +169,10 @@ export function createHudServer(project) {
       }
       if (url.pathname === '/tree') {
         json(response, 200, await repositoryTree(project.root));
+        return;
+      }
+      if (url.pathname === '/source') {
+        json(response, 200, await sourceExcerpt(project, url.searchParams.get('path'), url.searchParams.get('context') ?? 2));
         return;
       }
       if (url.pathname === '/media') {

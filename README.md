@@ -138,6 +138,8 @@ node tools/hud/cli.mjs handoff --copy
 
 `rg` exit code 1 is represented truthfully as a successful zero-match search. Missing tools are blocked and other search-tool failures remain failed. The compact handoff lists the repository, branch, scope, exact command, factual file/line counts, and the immutable run ID and raw evidence paths. The live map reads `lastOperation` from `currentState()` and highlights those same paths; it does not infer dependencies or file meaning.
 
+Selecting a matching file in the live map requests a bounded read-only excerpt from `/source`. The server accepts only a file in the current repository projection that also appears in the latest Search record, derives the line numbers from that record, limits context and file size, rejects binary content, and reports whether the Search evidence is `CURRENT` or `STALE`. Snapshot mode does not claim source access.
+
 In the live renderer, choose Search from the toolkit and submit an explicit `search "query" scope` operation. The browser sends structured JSON rather than a command string; the runtime validates it, runs `rg` directly without a shell, records the evidence, and returns refreshed semantic state. Snapshot mode continues to copy the equivalent CLI command without claiming execution.
 
 `hud visual-state` remains a compatibility path for static hosting. It writes ignored `hud-state.js`, which contains machine-specific paths and transient Git state. Static mode can navigate that snapshot but cannot stream repository media. The browser command bar stages and copies exact commands; actual command execution remains owned by the CLI and Windows bridge.

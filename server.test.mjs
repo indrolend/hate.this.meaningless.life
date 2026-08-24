@@ -47,6 +47,23 @@ test('HUD server exposes live reads, typed Search, and byte-range media without 
   assert.deepEqual(state.lastOperation.files, [{ path: 'media/tone.wav', count: 1, lines: [1] }]);
   assert.ok(state.repository.root.directories.some((directory) => directory.path === 'media'));
 
+  const sourceResponse = await fetch(`${base}/source?path=${encodeURIComponent('media/tone.wav')}&context=0`);
+  assert.equal(sourceResponse.status, 200);
+  const source = await sourceResponse.json();
+  assert.equal(source.path, 'media/tone.wav');
+  assert.equal(source.runId, state.last.runId);
+  assert.equal(source.evidence, 'CURRENT');
+  assert.deepEqual(source.excerpts, [{
+    matchLine: 1, startLine: 1, endLine: 1,
+    lines: [{ number: 1, text: 'RIFFtestWAVE', match: true }],
+  }]);
+  writeFileSync(join(project.root, 'media', 'tone.wav'), Buffer.from('RIFFchangedWAVE'));
+  assert.equal((await (await fetch(`${base}/source?path=${encodeURIComponent('media/tone.wav')}&context=0`)).json()).evidence, 'STALE');
+  writeFileSync(join(project.root, 'media', 'tone.wav'), Buffer.from('RIFFtestWAVE'));
+  assert.equal((await fetch(`${base}/source?path=${encodeURIComponent('media/clip.mp4')}`)).status, 409);
+  assert.equal((await fetch(`${base}/source?path=../secret.txt`)).status, 404);
+  assert.equal((await fetch(`${base}/source?path=${encodeURIComponent('media/tone.wav')}&context=20`)).status, 400);
+
   const treeResponse = await fetch(`${base}/tree`);
   assert.equal(treeResponse.status, 200);
   assert.equal((await treeResponse.json()).fileCount, 5);

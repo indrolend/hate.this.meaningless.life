@@ -242,6 +242,7 @@
     renderMedia(file);
     const status = file.gitStatus === '??' ? 'untracked' : file.gitStatus ? file.gitStatus : 'unchanged';
     const match = searchFiles.get(file.path);
+    renderSource(file, match);
     $('#focusFacts').innerHTML = `<div class="fact"><div class="fact-label">Type</div><div class="fact-value">${file.kind}</div></div><div class="fact"><div class="fact-label">Size</div><div class="fact-value">${formatSize(file.size)}</div></div><div class="fact"><div class="fact-label">Git</div><div class="fact-value">${status}</div></div>${match ? `<div class="fact search-fact"><div class="fact-label">Search matches</div><div class="fact-value">${match.count}</div></div><div class="fact search-fact"><div class="fact-label">Actual lines</div><div class="fact-value">${match.lines.join(', ')}</div></div>` : ''}`;
     focus.classList.add('open');
     focus.setAttribute('aria-hidden', 'false');
@@ -294,6 +295,58 @@
       ? 'Playback depends on browser support for the codecs inside this file.'
       : `${extension.toUpperCase()} repository preview`;
     preview.appendChild(note);
+  }
+
+  async function renderSource(file, match) {
+    const preview = $('#sourcePreview');
+    preview.replaceChildren();
+    preview.classList.remove('open');
+    if (!match) return;
+    preview.classList.add('open');
+    if (!liveState) {
+      preview.innerHTML = '<div class="media-note">Source excerpts require the live local HUD runtime.</div>';
+      return;
+    }
+    preview.innerHTML = '<div class="media-note">Loading factual source context…</div>';
+    try {
+      const response = await fetch(`/source?path=${encodeURIComponent(file.path)}&context=2`, { cache: 'no-store' });
+      const value = await response.json();
+      if (!response.ok) throw new Error(value.error || `Source request failed with HTTP ${response.status}.`);
+      if (selected?.path !== file.path) return;
+      preview.replaceChildren();
+      const head = document.createElement('div');
+      head.className = 'source-head';
+      const label = document.createElement('span');
+      label.textContent = `SEARCH ${value.query} · run:${value.runId}`;
+      const evidence = document.createElement('strong');
+      evidence.textContent = value.evidence;
+      head.append(label, evidence);
+      const code = document.createElement('div');
+      code.className = 'source-code';
+      value.excerpts.forEach((excerpt, excerptIndex) => {
+        if (excerptIndex) {
+          const separator = document.createElement('div');
+          separator.className = 'source-separator';
+          code.appendChild(separator);
+        }
+        excerpt.lines.forEach((line) => {
+          const row = document.createElement('div');
+          row.className = `source-line${line.match ? ' match' : ''}`;
+          const number = document.createElement('span');
+          number.className = 'source-number';
+          number.textContent = String(line.number);
+          const text = document.createElement('span');
+          text.textContent = line.text;
+          row.append(number, text);
+          code.appendChild(row);
+        });
+      });
+      preview.append(head, code);
+    } catch (error) {
+      if (selected?.path !== file.path) return;
+      preview.innerHTML = '<div class="media-note"></div>';
+      preview.querySelector('.media-note').textContent = error.message;
+    }
   }
 
   function closeFocus() {
