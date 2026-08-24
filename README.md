@@ -116,6 +116,10 @@ test  change  commit  push  fail  workflow  reset
 
 The prototype proves presentation and motion only. It does not execute real commands, watch the filesystem, or replace the core. Its next integration step is a thin adapter from `hud state --json` and semantic command events into the existing fake state/event model.
 
+The central repository is the interactive hero surface. Its particle transition adapts the proven `basicbrowserslim/js/spa` contract: rasterize current and target surfaces, sample visible pixels, explode through shallow projected depth, and reform with a spring overshoot. Pointer drag gives the hero a resisted pull and spring return; click, Enter, or Space reveals its evidence.
+
+An optional local `hud-state.js` can assign a `hud state --json` snapshot to `window.commandHudRealState`. The file is ignored because it contains machine-specific paths and transient Git state. The `real` command, or initial page load when that global exists, hydrates the same visual model without introducing another backend.
+
 ## Windows CommandHUD bridge
 
 The active bridge lives in the separate `hate.this.meaningless.life` repository at `legacy/commandhud/CommandHud-v21-corebridge.ps1`.

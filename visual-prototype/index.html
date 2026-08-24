@@ -28,13 +28,14 @@
   <form class="command-bar" id="commandForm">
     <span class="prompt">›</span>
     <label class="sr" for="commandInput">Demo command</label>
-    <input id="commandInput" autocomplete="off" spellcheck="false" placeholder="test  change  commit  push  fail  reset">
+    <input id="commandInput" autocomplete="off" spellcheck="false" placeholder="real  test  change  commit  push  fail  reset">
     <button id="runButton" type="submit">RUN</button>
   </form>
   <div class="help">ENTER to run · R raw evidence<br>click an object for detail</div>
   <pre class="raw" id="rawPanel"></pre>
   <div class="sr" id="liveStatus" aria-live="polite"></div>
 
+  <script src="./hud-state.js"></script>
   <script>
   (() => {
     'use strict';
@@ -54,16 +55,74 @@
       ahead:1, selected:null, raw:'CommandHUD visual prototype ready.\nNo command has run yet.'
     });
     let state = initialState();
+
+    function visualStatus(value) {
+      const status = String(value || '').toLowerCase();
+      if (status === 'pass') return 'success';
+      if (status === 'fail' || status === 'blocked' || status === 'error') return 'failure';
+      if (status === 'running') return 'running';
+      return 'idle';
+    }
+
+    function applyRealState(real) {
+      if (!real || typeof real !== 'object') return false;
+
+      const nextState = {
+        ...initialState(),
+        project: real.project?.name || 'unknown-project',
+        cwd: real.cwd?.display || real.cwd?.absolute || '.',
+        branch: real.git?.branch || 'detached',
+        remote: real.git?.upstreamRef
+          ? String(real.git.upstreamRef).split('/')[0]
+          : 'origin',
+        dirtyFiles: Array.isArray(real.git?.changedFiles)
+          ? real.git.changedFiles.length
+          : (real.git?.dirty ? 1 : 0),
+        ahead: Number(real.git?.ahead || 0),
+        workflow: real.workflow ? {
+          name: real.workflow.name,
+          current: real.workflow.currentStage,
+          count: real.workflow.stageCount,
+          status: String(real.workflow.status || '').toUpperCase()
+        } : null,
+        lastCommand: real.last?.stage || null,
+        status: visualStatus(real.status),
+        error: real.status === 'fail' || real.status === 'blocked'
+          ? (real.last?.headline || String(real.status).toUpperCase())
+          : null,
+        raw: JSON.stringify(real, null, 2)
+      };
+      beginHeroTransition(nextState);
+      state = nextState;
+
+      pulses.push({event:'state.real', at:Date.now()});
+      window.dispatchEvent(new CustomEvent('commandhud:event', {
+        detail: {type:'state.real', state:{...state}}
+      }));
+      announce(`Real HUD state loaded for ${state.project}`);
+      return true;
+    }
+
+    function loadRealState() {
+      return applyRealState(window.commandHudRealState);
+    }
+
     let busy = false;
     let particles = [];
     let pulses = [];
     let clock = 0;
     let shake = 0;
     let layout = {};
+    let heroVisualState = {...state};
+    let heroTransition = null;
+    let heroOffset = {x:0,y:0,vx:0,vy:0};
+    let heroPointer = null;
+    let suppressHeroClick = false;
 
     const expressions = { idle:'(._.)', running:'(o_o)', busy:'(O_O)', success:'(^_^)', warning:'(o_!)', failure:'(x_x)', waiting:'(-_-)' };
     const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
     const easeOut = t => 1 - Math.pow(1 - t, 3);
+    const easeOutBack = t => { const p=Math.max(0,Math.min(1,t)),s=1.1,u=p-1; return 1+(s+1)*u*u*u+s*u*u; };
     const mix = (a,b,t) => a + (b-a)*t;
     const announce = text => { liveStatus.textContent = text; };
 
@@ -84,6 +143,46 @@
       ctx.fillStyle=active ? '#17232d' : C.panel; ctx.fill();
       ctx.lineWidth=1.25; ctx.strokeStyle=active ? accent : '#263240'; ctx.stroke();
       ctx.restore(); clearGlow();
+    }
+
+    function makeHeroSurface(snapshot) {
+      const surface=document.createElement('canvas'); surface.width=430; surface.height=230;
+      const g=surface.getContext('2d'); const active=['running','busy','success'].includes(snapshot.status);
+      const accent=snapshot.status==='failure'?C.red:snapshot.status==='success'?C.lime:active?C.cyan:'#263240';
+      g.beginPath();g.roundRect(2,2,426,226,20);g.fillStyle=active?'#17232d':C.panel;g.fill();g.lineWidth=2;g.strokeStyle=accent;g.stroke();
+      g.textBaseline='middle';g.textAlign='left';g.font='800 10px ui-monospace,Consolas,monospace';g.fillStyle=active?C.cyan:C.muted;g.fillText('LOCAL REPOSITORY',24,28);
+      g.font='800 25px Inter,system-ui,sans-serif';g.fillStyle=C.ink;g.fillText(snapshot.project,24,62);
+      g.font='600 13px ui-monospace,Consolas,monospace';g.fillStyle=C.muted;g.fillText(snapshot.cwd,24,91);
+      g.fillStyle='#0c1219';g.fillRect(22,116,386,1);g.font='800 10px ui-monospace,Consolas,monospace';g.fillStyle=C.muted;g.fillText('BRANCH',24,142);
+      const branch=snapshot.branch.length>36?snapshot.branch.slice(0,33)+'…':snapshot.branch;
+      g.font='650 13px ui-monospace,Consolas,monospace';g.fillStyle=C.ink;g.fillText(branch,24,166);
+      g.beginPath();g.roundRect(352,142,54,34,11);g.fillStyle=snapshot.status==='failure'?'#351721':snapshot.status==='success'?'#21311b':'#142531';g.fill();
+      g.textAlign='center';g.font='900 11px Inter,system-ui,sans-serif';g.fillStyle=snapshot.status==='failure'?C.red:snapshot.status==='success'?C.lime:C.cyan;g.fillText(snapshot.status==='failure'?'FAIL':snapshot.status==='success'?'PASS':snapshot.status==='busy'?'RUN':'LIVE',379,159);
+      return surface;
+    }
+
+    function sampleHero(surface,step=5) {
+      const data=surface.getContext('2d').getImageData(0,0,surface.width,surface.height).data,out=[];
+      for(let y=0;y<surface.height;y+=step)for(let x=0;x<surface.width;x+=step){const i=(y*surface.width+x)*4,a=data[i+3];if(a>32)out.push({x,y,c:[data[i],data[i+1],data[i+2],a/255]});}
+      return out;
+    }
+
+    function coverage(list,count,index){return list[Math.floor((index*list.length)/count)%list.length];}
+    function beginHeroTransition(nextState) {
+      const from=sampleHero(makeHeroSurface(heroVisualState)),to=sampleHero(makeHeroSurface(nextState));
+      const count=Math.min(1500,Math.max(from.length,to.length)); if(!count){heroVisualState={...nextState};return;}
+      const points=[];
+      for(let i=0;i<count;i++){const a=coverage(from,count,i),b=coverage(to,count,(i*613)%count),angle=Math.random()*TAU,radius=45+Math.random()*65;points.push({x0:a.x,y0:a.y,c0:a.c,x1:b.x,y1:b.y,c1:b.c,ex:a.x+Math.cos(angle)*radius,ey:a.y+Math.sin(angle)*radius,z:(Math.random()-.5)*150});}
+      heroVisualState={...nextState}; heroTransition={points,started:performance.now(),explode:120,reform:230};
+    }
+
+    function drawHeroParticles(r,now) {
+      const tr=heroTransition,elapsed=now-tr.started,total=tr.explode+tr.reform;
+      if(elapsed>=total){heroTransition=null;return false;}
+      const explode=elapsed<tr.explode,p=explode?elapsed/tr.explode:(elapsed-tr.explode)/tr.reform,move=explode?p:easeOutBack(p),sx=r.w/430,sy=r.h/230,cx=215,cy=115;
+      for(const pt of tr.points){const x=explode?mix(pt.x0,pt.ex,move):mix(pt.ex,pt.x1,move),y=explode?mix(pt.y0,pt.ey,move):mix(pt.ey,pt.y1,move),z=explode?pt.z*p:pt.z*(1-p),scale=300/(300+z),px=cx+(x-cx)*scale,py=cy+(y-cy)*scale,c=explode?pt.c0:pt.c1;
+        ctx.globalAlpha=Math.max(.15,Math.min(1,scale))*c[3];ctx.fillStyle=`rgb(${c[0]},${c[1]},${c[2]})`;ctx.beginPath();ctx.arc(r.x+heroOffset.x+px*sx,r.y+heroOffset.y+py*sy,Math.max(1.1,2.3*scale*sx),0,TAU);ctx.fill();}
+      ctx.globalAlpha=1;return true;
     }
 
     function computeLayout() {
@@ -121,19 +220,12 @@
     }
 
     function drawRepo() {
-      const r=layout.repo, active=['running','busy','success'].includes(state.status);
-      card(r,active,state.status==='success'?C.lime:C.cyan);
-      label('LOCAL REPOSITORY',r.x+24,r.y+28,active?C.cyan:C.muted);
-      text(state.project,r.x+24,r.y+62,Math.min(25,r.w/17),C.ink,800);
-      text(state.cwd,r.x+24,r.y+91,13,C.muted,600,'left','ui-monospace,Consolas,monospace');
-      ctx.fillStyle='#0c1219'; rounded(r.x+22,r.y+116,r.w-44,1,1); ctx.fill();
-      label('BRANCH',r.x+24,r.y+142);
-      const branch=state.branch.length>31?state.branch.slice(0,28)+'…':state.branch;
-      text(branch,r.x+24,r.y+166,13,C.ink,650,'left','ui-monospace,Consolas,monospace');
-      const badgeX=r.x+r.w-78, badgeY=r.y+142;
-      rounded(badgeX,badgeY,54,34,11); ctx.fillStyle=state.status==='failure'?'#351721':state.status==='success'?'#21311b':'#142531'; ctx.fill();
-      text(state.status==='failure'?'FAIL':state.status==='success'?'PASS':state.status==='busy'?'RUN':'LIVE',badgeX+27,badgeY+17,11,state.status==='failure'?C.red:state.status==='success'?C.lime:C.cyan,900,'center');
-      if(state.error) drawErrorToken(r.x+r.w-18,r.y+36);
+      const r=layout.repo,active=['running','busy','success'].includes(state.status);
+      heroOffset.vx+=(0-heroOffset.x)*.12;heroOffset.vy+=(0-heroOffset.y)*.12;heroOffset.vx*=.72;heroOffset.vy*=.72;if(!heroPointer){heroOffset.x+=heroOffset.vx;heroOffset.y+=heroOffset.vy;}
+      ctx.save();if(active&&!heroTransition)glow(state.status==='success'?C.lime:C.cyan,22);
+      if(!heroTransition||!drawHeroParticles(r,clock))ctx.drawImage(makeHeroSurface(heroVisualState),r.x+heroOffset.x,r.y+heroOffset.y,r.w,r.h);
+      ctx.restore();clearGlow();
+      if(state.error)drawErrorToken(r.x+r.w-18+heroOffset.x,r.y+36+heroOffset.y);
     }
 
     function drawBuddy() {
@@ -221,6 +313,8 @@
     }
 
     function setState(patch,eventName) {
+      const next={...state,...patch};
+      if(patch.status&&patch.status!==state.status)beginHeroTransition(next);
       state={...state,...patch};
       if(eventName) pulses.push({event:eventName,at:Date.now()});
       window.dispatchEvent(new CustomEvent('commandhud:event',{detail:{type:eventName,state:{...state}}}));
@@ -237,7 +331,13 @@
     async function run(command) {
       command=String(command||'').trim().toLowerCase(); if(!command||busy)return;
       busy=true; runButton.disabled=true; input.disabled=true;
-      if(command==='reset'){state=initialState();particles=[];rawPanel.classList.remove('open');busy=false;runButton.disabled=false;input.disabled=false;input.focus();announce('State reset');return;}
+      if(command==='reset'){state=initialState();heroVisualState={...state};heroTransition=null;heroOffset={x:0,y:0,vx:0,vy:0};particles=[];rawPanel.classList.remove('open');busy=false;runButton.disabled=false;input.disabled=false;input.focus();announce('State reset');return;}
+      if(command==='real'){
+        const loaded=loadRealState();
+        busy=false;runButton.disabled=false;input.disabled=false;input.focus();
+        if(!loaded) setState({error:'NO REAL STATE',status:'warning',raw:'hud-state.js did not provide window.commandHudRealState'},'state.missing');
+        return;
+      }
       await start(command);
       const repo=layout.repo,test=layout.test,remote=layout.remote,files=layout.files;
       if(command==='test') {
@@ -267,28 +367,36 @@
         for(let i=0;i<4;i++)spawnParticle('check',{x:repo.x+repo.w*.5,y:repo.y+repo.h*.5},{x:repo.x+repo.w*.78,y:repo.y+repo.h*.72},C.lime,'✓',i*90,650);
         await finish('success');
       } else {
-        setState({error:'COMMAND UNKNOWN',status:'warning',raw:`> ${command}\nUnknown demo command.\nTry: test change commit push fail workflow reset`},'command.unknown');
+        setState({error:'COMMAND UNKNOWN',status:'warning',raw:`> ${command}\nUnknown demo command.\nTry: real test change commit push fail workflow reset`},'command.unknown');
         await finish('warning');
       }
     }
 
     function hit(rect,x,y){return rect&&x>=rect.x&&x<=rect.x+rect.w&&y>=rect.y&&y<=rect.y+rect.h;}
     canvas.addEventListener('click',e=>{
+      if(suppressHeroClick){suppressHeroClick=false;return;}
       const p={x:e.clientX,y:e.clientY}; let selected=null;
       for(const name of ['repo','test','remote','files'])if(hit(layout[name],p.x,p.y))selected=name;
       if(selected){state.selected=selected;rawPanel.textContent=state.raw+`\n\nINSPECT=${selected.toUpperCase()}\nCurrent state is derived, not appended.`;rawPanel.classList.add('open');}
     });
+    canvas.addEventListener('pointerdown',e=>{if(hit(layout.repo,e.clientX,e.clientY)){heroPointer={id:e.pointerId,x:e.clientX,y:e.clientY,ox:heroOffset.x,oy:heroOffset.y};suppressHeroClick=false;canvas.setPointerCapture(e.pointerId);canvas.style.cursor='grabbing';}});
+    canvas.addEventListener('pointermove',e=>{if(heroPointer&&e.pointerId===heroPointer.id){const dx=e.clientX-heroPointer.x,dy=e.clientY-heroPointer.y;heroOffset.x=heroPointer.ox+dx*.38;heroOffset.y=heroPointer.oy+dy*.38;heroOffset.vx=dx*.04;heroOffset.vy=dy*.04;if(Math.hypot(dx,dy)>8)suppressHeroClick=true;}else canvas.style.cursor=hit(layout.repo,e.clientX,e.clientY)?'grab':'default';});
+    canvas.addEventListener('pointerup',e=>{if(heroPointer&&e.pointerId===heroPointer.id){heroPointer=null;canvas.releasePointerCapture(e.pointerId);canvas.style.cursor='grab';}});
+    canvas.addEventListener('keydown',e=>{if((e.key==='Enter'||e.key===' ')&&document.activeElement===canvas){e.preventDefault();state.selected='repo';rawPanel.textContent=state.raw+'\n\nINSPECT=REPO\nActivated from the interactive hero.';rawPanel.classList.add('open');}});
     window.addEventListener('keydown',e=>{if(e.key.toLowerCase()==='r'&&document.activeElement!==input){rawPanel.textContent=state.raw;rawPanel.classList.toggle('open');}});
     form.addEventListener('submit',e=>{e.preventDefault();const value=input.value;input.value='';run(value);});
     input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();form.requestSubmit();}});
 
     window.commandHudDemo={
       run,
+      loadRealState,
+      applyRealState,
       getState:()=>JSON.parse(JSON.stringify(state)),
       getEvents:()=>JSON.parse(JSON.stringify(pulses)),
       isBusy:()=>busy,
       reset:()=>run('reset')
     };
+    if (window.commandHudRealState) loadRealState();
     computeLayout(); requestAnimationFrame(render); setTimeout(()=>input.focus(),100);
   })();
   </script>
