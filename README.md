@@ -146,6 +146,8 @@ Repository-root searches normalize ripgrep's leading `./` so result paths retain
 
 The visual command bar has two explicit modes. Terminal is the default and continues to stage ordinary commands; power users can also type `search "query" scope` there. Choosing Search from the toolkit enters a focused Search mode where the input is literal query text and scope is selected separately as Repository or Current Directory. This lets multiword queries remain unquoted while keeping the operation boundary visible.
 
+The toolkit's Library directory is derived from `discoverCommands()` in the same live or snapshot state as the repository map. It lists the current repository's declared package scripts and factual command adapters instead of maintaining another curated command list. Selecting an entry stages its exact command in Terminal mode for inspection or editing; it does not grant the browser arbitrary execution.
+
 In the live renderer, submitting Search sends structured `query` and `scope` JSON rather than a command string. The runtime validates it, runs `rg` directly without a shell, records the evidence, and returns refreshed semantic state. Snapshot mode keeps the same Search controls but only copies the equivalent CLI command without claiming execution.
 
 `hud visual-state` remains a compatibility path for static hosting. It writes ignored `hud-state.js`, which contains machine-specific paths and transient Git state. Static mode can navigate that snapshot but cannot stream repository media. The browser command bar stages and copies exact commands; actual command execution remains owned by the CLI and Windows bridge.

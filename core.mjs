@@ -744,6 +744,7 @@ export async function currentState(project, { cwd = process.cwd() } = {}) {
     cwd: { absolute: absoluteCwd, display: cwdInProject ? (relativeCwd || '.') : absoluteCwd },
     git,
     repository,
+    commands: discoverCommands(project.root),
     workflow: workflow ? {
       id: workflow.id,
       name: workflow.name,

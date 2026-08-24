@@ -62,6 +62,12 @@
       ['Open selected file', 'Prepare the conventional editor command.', 'code --goto {selection}', 'selection'],
     ],
   };
+  commands.Library = (state?.commands || []).map((entry) => [
+    entry.name.startsWith('npm:') ? entry.name.slice(4) : entry.name,
+    entry.name.startsWith('npm:') ? 'Script declared by this repository.' : 'Command adapter discovered in this repository.',
+    entry.command,
+    entry.name.startsWith('npm:') ? 'package script' : 'repository tool',
+  ]);
 
   function indexDirectory(directory) {
     directoriesByPath.set(directory.path, directory);
@@ -453,8 +459,31 @@
   }
 
   function renderPicker() {
-    $('#categories').innerHTML = Object.keys(commands).map((name) => `<button type="button" class="category${name === category ? ' selected' : ''}" data-category="${name}">${name}</button>`).join('');
-    $('#pickerList').innerHTML = filteredCommands().map((command, index) => `<button type="button" class="command-item" data-command="${index}"><span class="command-name">${command[0]}</span><span class="scope">${command[3]}</span><span class="command-desc">${command[1]}</span><span class="command-code">${resolved(command[2])}</span></button>`).join('');
+    const categories = $('#categories');
+    categories.replaceChildren();
+    for (const name of Object.keys(commands)) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = `category${name === category ? ' selected' : ''}`;
+      button.dataset.category = name;
+      button.textContent = name;
+      categories.appendChild(button);
+    }
+    const list = $('#pickerList');
+    list.replaceChildren();
+    filteredCommands().forEach((command, index) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'command-item';
+      button.dataset.command = index;
+      for (const [className, text] of [['command-name', command[0]], ['scope', command[3]], ['command-desc', command[1]], ['command-code', resolved(command[2])]]) {
+        const element = document.createElement('span');
+        element.className = className;
+        element.textContent = text;
+        button.appendChild(element);
+      }
+      list.appendChild(button);
+    });
   }
 
   function togglePicker(force) {

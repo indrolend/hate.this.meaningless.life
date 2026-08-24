@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, fetchUpdate, formatPacket, gitSnapshot, parseSearchOutput, readProjectState, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runCommand, searchRepository, setWorkingValue, workingValue, workflowView } from './core.mjs';
+import { buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, discoverCommands, fetchUpdate, formatPacket, gitSnapshot, parseSearchOutput, readProjectState, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runCommand, searchRepository, setWorkingValue, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -23,6 +23,18 @@ function fixtureProject() {
   const root = fixture();
   return resolveProject({ cwd: root, env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'hud-state-')) } });
 }
+
+test('repository command discovery derives a deterministic inspectable library', () => {
+  const root = mkdtempSync(join(tmpdir(), 'hud-commands-'));
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node test.mjs', build: 'node build.mjs' } }));
+  mkdirSync(join(root, 'tools'));
+  writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), '');
+  assert.deepEqual(discoverCommands(root), [
+    { name: 'npm:build', command: 'npm run build' },
+    { name: 'npm:test', command: 'npm run test' },
+    { name: 'native-tests', command: 'node tools/run-native-tests.mjs' },
+  ]);
+});
 
 test('reducers retain concise evidence and cause classification', () => {
   const pass = reduceOutput('npm test', '100% tests passed, 0 tests failed out of 9', '', 0);
@@ -313,6 +325,7 @@ test('current semantic state derives renderer-neutral project, cwd, git, workflo
   assert.equal(value.cwd.display.replaceAll('\\', '/'), 'tools/hud');
   assert.equal(value.git.dirty, false);
   assert.ok(value.repository.root.files.some((file) => file.path === 'file.txt'));
+  assert.deepEqual(value.commands, []);
   assert.equal(value.workflow.name, 'state contract');
   assert.equal(value.workflow.status, 'in_progress');
   assert.equal(value.last.stage, 'inspect');
