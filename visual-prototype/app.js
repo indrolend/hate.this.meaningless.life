@@ -14,6 +14,7 @@
   const repository = state?.repository;
   const search = state?.lastOperation?.type === 'search' ? state.lastOperation : null;
   const searchFiles = new Map((search?.files || []).map((file) => [file.path, file]));
+  const searchOrder = (search?.files || []).map((file) => file.path);
   const app = $('#app');
   const viewport = $('#viewport');
   const world = $('#world');
@@ -320,7 +321,27 @@
       label.textContent = `SEARCH ${value.query} · run:${value.runId}`;
       const evidence = document.createElement('strong');
       evidence.textContent = value.evidence;
-      head.append(label, evidence);
+      const navigation = document.createElement('div');
+      navigation.className = 'source-navigation';
+      const position = searchOrder.indexOf(file.path);
+      const previous = document.createElement('button');
+      previous.type = 'button';
+      previous.className = 'source-nav';
+      previous.setAttribute('aria-label', 'Previous matching file');
+      previous.textContent = '←';
+      previous.disabled = position <= 0;
+      previous.onclick = () => openFile(searchOrder[position - 1], true);
+      const count = document.createElement('span');
+      count.textContent = `${position + 1}/${searchOrder.length}`;
+      const next = document.createElement('button');
+      next.type = 'button';
+      next.className = 'source-nav';
+      next.setAttribute('aria-label', 'Next matching file');
+      next.textContent = '→';
+      next.disabled = position < 0 || position >= searchOrder.length - 1;
+      next.onclick = () => openFile(searchOrder[position + 1], true);
+      navigation.append(previous, count, next);
+      head.append(label, evidence, navigation);
       const code = document.createElement('div');
       code.className = 'source-code';
       value.excerpts.forEach((excerpt, excerptIndex) => {
