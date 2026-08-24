@@ -18,6 +18,8 @@ Without linking, use `npm run hud -- <command>`.
 
 ```text
 hud context
+hud state
+hud state --json
 hud objective "Investigate Windows renderer regression"
 hud frontier "Rebuild and visually verify shadows"
 hud continue
@@ -56,6 +58,98 @@ CommandHud/
 Each `run.json` is created immutably and records repository currency before and after execution. `state.json` contains only the most recent run pointer plus the current objective and frontier. History is derived from run records; there is no parallel history database.
 
 `hud continue` compares durable evidence with the current HEAD and a content fingerprint of tracked and non-ignored untracked files. Evidence is `CURRENT`, `STALE`, or `UNKNOWN`; legacy records without currency remain readable and are classified `UNKNOWN`.
+
+## Current architecture
+
+The core follows one directional data flow:
+
+```text
+real command output
+  -> immutable stdout.log / stderr.log
+  -> deterministic reduction
+  -> run.json semantic record
+  -> derived presentation, workflow, and current-state views
+  -> text, JSON, or visual renderer
+```
+
+`core.mjs` owns project resolution, Git authority, command execution, raw evidence, reduction, immutable run records, workflow derivation, and the renderer-neutral current state. `cli.mjs` parses commands and renders those core objects. Renderers should consume core objects instead of reparsing terminal output.
+
+There is deliberately no mutable workflow database. Workflow state is derived from immutable run records. `state.json` remains small and contains only the latest run pointer plus objective/frontier working state.
+
+## Workflow runs
+
+A run joins a workflow when the CLI receives workflow metadata:
+
+```text
+hud run --workflow-id verify-1 --workflow-name "verify change" --stage test --stage-index 1 --stage-count 2 npm test
+hud workflow verify-1
+hud workflow verify-1 --json
+```
+
+Stage retries create new immutable run records. The workflow view selects the latest attempt for each stage and reports pending, failed, blocked, or completed state.
+
+The Windows bridge also accepts this compact input form:
+
+```text
+@hud verify-1 "verify change" test 1 2 :: npm test
+```
+
+## Canonical semantic state
+
+`hud state` and `hud state --json` render the same `currentState()` object. It is a derived snapshot, not another persisted authority. Current fields are:
+
+```text
+project  cwd  git  workflow  last  next  status
+```
+
+This is the boundary for quick-context text and future visual renderers. Add facts here only when an existing authoritative source can derive them and a real renderer needs them.
+
+## Visual language prototype
+
+Open `visual-prototype/index.html` directly in a browser. It is a standalone Canvas prototype with no dependencies or build step.
+
+Demo commands:
+
+```text
+test  change  commit  push  fail  workflow  reset
+```
+
+The prototype proves presentation and motion only. It does not execute real commands, watch the filesystem, or replace the core. Its next integration step is a thin adapter from `hud state --json` and semantic command events into the existing fake state/event model.
+
+## Windows CommandHUD bridge
+
+The active bridge lives in the separate `hate.this.meaningless.life` repository at `legacy/commandhud/CommandHud-v21-corebridge.ps1`.
+
+The bridge owns UI/runspace concerns: input, animation, cancellation, current PowerShell directory, and local UI history. DATA owns run evidence, reduction, Git/workflow semantics, and presentation. The bridge resolves `tools/hud/cli.mjs` from the active repository and falls back to ordinary PowerShell when no compatible core exists.
+
+Important cwd contract: commands execute in a child PowerShell process, which records its final working directory for the parent runspace. Preserve that handoff when changing command transport.
+
+## Continue from here
+
+Before changing the HUD:
+
+```text
+git status --short --branch
+npm run hud:test
+node tools/hud/cli.mjs state
+```
+
+Preserve these contracts:
+
+- raw stdout/stderr remains available and immutable;
+- semantic views are derived from authoritative state;
+- a nonzero underlying command remains nonzero;
+- workflow retries resolve from the latest immutable stage attempt;
+- wrong repositories are rejected rather than silently substituted;
+- the visual prototype remains a renderer, not a second backend.
+
+Current local continuation sequence is represented by these commits:
+
+```text
+1435baf Add workflow-aware CommandHUD run records
+1fcf19a Expose canonical HUD semantic state
+e3169ed Prototype visual CommandHUD language
+```
 
 Set `HUD_STATE_ROOT` to isolate state in tests or automation.
 
