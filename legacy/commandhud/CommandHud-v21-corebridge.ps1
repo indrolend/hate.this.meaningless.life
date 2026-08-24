@@ -395,11 +395,23 @@ function Start-Command {
         $workflowArgs = "--workflow-id `"$workflowId`" --workflow-name `"$workflowName`" --stage `"$workflowStage`" --stage-index $workflowIndex --stage-count $workflowCount"
     }
 
-    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $encodedRequest = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($request))
     $encodedLivePath = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:ActiveLivePath))
     $cwdPath = Join-Path $logRoot ('cwd-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.txt')
     $encodedCwdPath = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cwdPath))
+    $encodedUserCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
+    $childCommand = @"
+`$__cj_command = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('$encodedUserCommand'))
+`$__cj_cwd = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$encodedCwdPath'))
+try {
+    . ([ScriptBlock]::Create(`$__cj_command))
+} finally {
+    try {
+        [System.IO.File]::WriteAllText(`$__cj_cwd, (Get-Location).Path, [System.Text.UTF8Encoding]::new(`$false))
+    } catch {}
+}
+"@
+    $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand))
     $gitRoot = (& git -C $directory rev-parse --show-toplevel 2>$null | Out-String).Trim()
     $hudCli = if ($gitRoot) { Join-Path $gitRoot 'tools\hud\cli.mjs' } else { $null }
 
@@ -428,9 +440,6 @@ try {
     }
 
     `$global:__CJ_EXIT = if (`$null -ne `$global:LASTEXITCODE) { [int]`$global:LASTEXITCODE } else { 0 }
-    try {
-        [System.IO.File]::WriteAllText(`$__cj_cwd, (Get-Location).Path, [System.Text.UTF8Encoding]::new(`$false))
-    } catch {}
 } catch {
     `$global:__CJ_EXIT = 1
     Write-Error `$_
