@@ -35,6 +35,7 @@
   let camera = { x: 48, y: 48, z: 0.92 };
   let gesture = null;
   let category = 'Repository';
+  let inputMode = 'terminal';
 
   const commands = {
     Repository: [
@@ -388,16 +389,54 @@
     return query ? { query, scope: match[4] || '.' } : null;
   }
 
+  function enterSearchMode(scope = '.') {
+    inputMode = 'search';
+    $('#terminal').classList.add('search-mode');
+    $('.prompt').textContent = '?';
+    input.value = '';
+    input.placeholder = 'Search literal text';
+    input.setAttribute('aria-label', 'Search query');
+    const scopeInput = $('#searchScope');
+    const current = currentDirectory || '.';
+    scopeInput.replaceChildren();
+    for (const [value, label] of [['.', 'Repository'], [current, `Current · ${current}`]]) {
+      if ([...scopeInput.options].some((option) => option.value === value)) continue;
+      const option = document.createElement('option');
+      option.value = value;
+      option.textContent = label;
+      scopeInput.appendChild(option);
+    }
+    scopeInput.value = scope === '{current}' ? current : scope;
+    previewInput();
+    input.focus();
+  }
+
+  function exitSearchMode() {
+    inputMode = 'terminal';
+    $('#terminal').classList.remove('search-mode');
+    $('.prompt').textContent = '$';
+    input.value = '';
+    input.placeholder = 'Enter or discover an exact command';
+    input.setAttribute('aria-label', 'Terminal command');
+    $('.run').disabled = false;
+    $('.run').textContent = 'Copy';
+    input.focus();
+  }
+
   function previewInput() {
-    const operation = typedSearch(input.value);
-    const searchIntent = /^\s*search(?:\s|$)/i.test(input.value);
+    const operation = inputMode === 'search'
+      ? input.value.trim() ? { query: input.value, scope: $('#searchScope').value || '.' } : null
+      : typedSearch(input.value);
+    const searchIntent = inputMode === 'search' || /^\s*search(?:\s|$)/i.test(input.value);
     $('.run').disabled = searchIntent && !operation;
     $('.run').textContent = searchIntent ? 'Search' : 'Copy';
     if (!operation) {
       if (searchIntent) {
         output.classList.add('open');
         $('#outputTitle').textContent = 'Complete the Search request';
-        $('#outputText').textContent = 'Enter a query in quotes, followed by a repository scope.\n\nExample: search "current state" tools/hud';
+        $('#outputText').textContent = inputMode === 'search'
+          ? 'Enter the literal text to find, then choose Repository or Current Directory.'
+          : 'Enter a query in quotes, followed by a repository scope.\n\nExample: search "current state" tools/hud';
         $('#outputResults').replaceChildren();
       }
       return;
@@ -622,16 +661,25 @@
       copyHandoff();
       return;
     }
+    if (chosen[0] === 'Search repository' || chosen[0] === 'Search current directory') {
+      togglePicker(false);
+      enterSearchMode(chosen[0] === 'Search current directory' ? '{current}' : '.');
+      return;
+    }
     input.value = resolved(chosen[2]);
     togglePicker(false);
     previewInput();
     if (input.value.includes('""')) input.setSelectionRange(8, 8);
   };
   input.addEventListener('input', previewInput);
+  $('#searchScope').addEventListener('change', previewInput);
+  $('#inputMode').addEventListener('click', exitSearchMode);
   $('#terminal').onsubmit = async (event) => {
     event.preventDefault();
     togglePicker(false);
-    const operation = typedSearch(input.value);
+    const operation = inputMode === 'search'
+      ? input.value.trim() ? { query: input.value, scope: $('#searchScope').value || '.' } : null
+      : typedSearch(input.value);
     if (liveState && operation) await executeSearch(operation);
     else if (!liveState && operation) await stageCommand(`node tools/hud/cli.mjs search ${JSON.stringify(operation.query)} ${operation.scope}`);
     else await stageCommand(input.value);
@@ -641,7 +689,8 @@
     if (event.key === 'Escape') {
       if (picker.classList.contains('open')) togglePicker(false);
       else if (output.classList.contains('open')) output.classList.remove('open');
-      else closeFocus();
+      else if (focus.classList.contains('open')) closeFocus();
+      else if (inputMode === 'search') exitSearchMode();
     }
     if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
       event.preventDefault();

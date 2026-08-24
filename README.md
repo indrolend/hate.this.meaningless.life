@@ -144,7 +144,9 @@ The source header follows the deterministic file order already stored on the Sea
 
 Repository-root searches normalize ripgrep's leading `./` so result paths retain the same identity as repository projection paths. The result panel exposes those factual paths as direct file-focus actions. In live mode, the Search toolkit also fetches and copies the actual compact packet from `/handoff`; snapshot mode retains the CLI-copy fallback.
 
-In the live renderer, choose Search from the toolkit and submit an explicit `search "query" scope` operation. The browser sends structured JSON rather than a command string; the runtime validates it, runs `rg` directly without a shell, records the evidence, and returns refreshed semantic state. Snapshot mode continues to copy the equivalent CLI command without claiming execution.
+The visual command bar has two explicit modes. Terminal is the default and continues to stage ordinary commands; power users can also type `search "query" scope` there. Choosing Search from the toolkit enters a focused Search mode where the input is literal query text and scope is selected separately as Repository or Current Directory. This lets multiword queries remain unquoted while keeping the operation boundary visible.
+
+In the live renderer, submitting Search sends structured `query` and `scope` JSON rather than a command string. The runtime validates it, runs `rg` directly without a shell, records the evidence, and returns refreshed semantic state. Snapshot mode keeps the same Search controls but only copies the equivalent CLI command without claiming execution.
 
 `hud visual-state` remains a compatibility path for static hosting. It writes ignored `hud-state.js`, which contains machine-specific paths and transient Git state. Static mode can navigate that snapshot but cannot stream repository media. The browser command bar stages and copies exact commands; actual command execution remains owned by the CLI and Windows bridge.
 
