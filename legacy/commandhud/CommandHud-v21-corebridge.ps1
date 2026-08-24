@@ -263,6 +263,14 @@ function Complete-Command([bool]$cancelled = $false) {
     }
     $status = if ($cancelled) { 'stopped' } elseif ($exitCode -eq 0 -and $errors.Count -eq 0) { 'passed' } else { 'failed' }
 
+    if (-not $cancelled -and $cwdPath -and (Test-Path -LiteralPath $cwdPath)) {
+        $finalDirectory = (Get-Content -LiteralPath $cwdPath -Raw).Trim()
+        if ($finalDirectory -and (Test-Path -LiteralPath $finalDirectory)) {
+            $script:Runspace.SessionStateProxy.Path.SetLocation($finalDirectory)
+        }
+        Remove-Item -LiteralPath $cwdPath -Force -ErrorAction SilentlyContinue
+    }
+
     if (-not $cancelled -and $script:HudCli -and (Test-Path -LiteralPath $script:HudCli)) {
         try {
             $hudJson = (& node $script:HudCli last --json --root $script:ActiveRecord.directory 2>$null | Out-String).Trim()
@@ -390,6 +398,8 @@ function Start-Command {
     $encodedCommand = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($command))
     $encodedRequest = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($request))
     $encodedLivePath = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script:ActiveLivePath))
+    $cwdPath = Join-Path $logRoot ('cwd-' + (Get-Date -Format 'yyyyMMdd-HHmmss-fff') + '.txt')
+    $encodedCwdPath = [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($cwdPath))
     $gitRoot = (& git -C $directory rev-parse --show-toplevel 2>$null | Out-String).Trim()
     $hudCli = if ($gitRoot) { Join-Path $gitRoot 'tools\hud\cli.mjs' } else { $null }
 
@@ -399,6 +409,7 @@ function Start-Command {
 `$global:__CJ_EXIT = `$null
 try {
     `$__cj_live = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$encodedLivePath'))
+    `$__cj_cwd = [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('$encodedCwdPath'))
 
     & {
         if ('$hudCli' -and (Test-Path -LiteralPath '$hudCli')) {
@@ -417,6 +428,9 @@ try {
     }
 
     `$global:__CJ_EXIT = if (`$null -ne `$global:LASTEXITCODE) { [int]`$global:LASTEXITCODE } else { 0 }
+    try {
+        [System.IO.File]::WriteAllText(`$__cj_cwd, (Get-Location).Path, [System.Text.UTF8Encoding]::new(`$false))
+    } catch {}
 } catch {
     `$global:__CJ_EXIT = 1
     Write-Error `$_
