@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, discoverCommands, discoverTools, runCommand, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, workingValue, workflowView, buildWorkflowPacket } from './core.mjs';
+import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, discoverCommands, discoverTools, runCommand, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 function parse(argv) {
   const args = [...argv];
@@ -92,6 +92,22 @@ async function main() {
   const { command, args, options } = parse(process.argv.slice(2));
   const project = await resolveProject({ root: options.root });
   if (command === 'context' || command === 'status') return context(project, options.json);
+  if (command === 'state') {
+    const value = await currentState(project);
+    if (options.json) return console.log(JSON.stringify(value, null, 2));
+    printObject({
+      project: value.project.name,
+      cwd: value.cwd.display,
+      branch: value.git.branch,
+      head: value.git.head.slice(0, 7),
+      dirty: value.git.dirty ? `${value.git.changedFiles.length} file${value.git.changedFiles.length === 1 ? '' : 's'}` : 'clean',
+      workflow: value.workflow ? `${value.workflow.name} ${value.workflow.currentStage ?? 0}/${value.workflow.stageCount ?? '?'} ${value.workflow.status.toUpperCase()}` : 'none',
+      last: value.last ? `${value.last.stage || 'command'} ${value.last.status.toUpperCase()} ${(value.last.durationMs / 1000).toFixed(1)}s` : 'none',
+      next: value.next ?? 'none',
+      status: value.status.toUpperCase(),
+    });
+    return;
+  }
   if (command === 'continue') {
     const value = await continuation(project);
     return options.json ? console.log(JSON.stringify(value, null, 2)) : renderContinue(value);

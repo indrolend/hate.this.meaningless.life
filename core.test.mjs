@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildPacket, buildWorkflowPacket, classifyEvidence, continuation, fetchUpdate, formatPacket, gitSnapshot, readProjectState, reduceOutput, repositoryCurrency, resolveProject, runCommand, setWorkingValue, workingValue, workflowView } from './core.mjs';
+import { buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, fetchUpdate, formatPacket, gitSnapshot, readProjectState, reduceOutput, repositoryCurrency, resolveProject, runCommand, setWorkingValue, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -298,6 +298,26 @@ test('workflow packet is compact and represents pending and retried stages', () 
     'CURRENT=2/3',
     'NEXT=3',
   ].join('\n'));
+});
+
+test('current semantic state derives renderer-neutral project, cwd, git, workflow, and last-run facts', async () => {
+  const project = await fixtureProject();
+  await runCommand(project, [process.execPath, '-e', 'console.log("STATE_OK")'], {
+    stream: false,
+    request: 'inspect semantic state',
+    workflow: { id: 'state-wf', name: 'state contract', stage: 'inspect', index: 1, count: 2 },
+  });
+
+  const value = await currentState(project, { cwd: join(project.root, 'tools', 'hud') });
+  assert.equal(value.project.id, 'indrolend/data');
+  assert.equal(value.cwd.display.replaceAll('\\', '/'), 'tools/hud');
+  assert.equal(value.git.dirty, false);
+  assert.equal(value.workflow.name, 'state contract');
+  assert.equal(value.workflow.status, 'in_progress');
+  assert.equal(value.last.stage, 'inspect');
+  assert.equal(value.last.status, 'pass');
+  assert.equal(value.next, 2);
+  assert.equal(value.status, 'in_progress');
 });
 
 test('packet schema contains only deterministic continuation fields', () => {

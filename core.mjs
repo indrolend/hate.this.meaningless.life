@@ -2,7 +2,7 @@ import { createHash, randomBytes } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
 import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
-import { dirname, join, resolve } from 'node:path';
+import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -559,6 +559,41 @@ export function buildWorkflowPacket(value) {
   }
 
   return lines.join('\n');
+}
+
+export async function currentState(project, { cwd = process.cwd() } = {}) {
+  const git = await gitSnapshot(project.root);
+  const runs = listRuns(project, 100);
+  const last = runs[0] || null;
+  const workflowRun = runs.find((run) => run.workflow?.id) || null;
+  const workflow = workflowRun ? workflowView(project, workflowRun.workflow.id, 100) : null;
+  const absoluteCwd = resolve(cwd);
+  const relativeCwd = relative(project.root, absoluteCwd);
+  const cwdInProject = relativeCwd === '' || (!isAbsolute(relativeCwd) && relativeCwd !== '..' && !relativeCwd.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`));
+
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    project: { id: project.identity.id, name: basename(project.root), root: project.root },
+    cwd: { absolute: absoluteCwd, display: cwdInProject ? (relativeCwd || '.') : absoluteCwd },
+    git,
+    workflow: workflow ? {
+      id: workflow.id,
+      name: workflow.name,
+      status: workflow.status,
+      currentStage: workflow.currentStage,
+      stageCount: workflow.stageCount,
+      nextStage: workflow.nextStage,
+    } : null,
+    last: last ? {
+      runId: last.id,
+      stage: last.workflow?.stage || null,
+      status: last.status,
+      durationMs: last.durationMs,
+      headline: last.presentation?.headline || last.reduction?.cause || null,
+    } : null,
+    next: workflow?.nextStage ?? null,
+    status: workflow?.status || last?.status || 'idle',
+  };
 }
 
 export function listRuns(project, limit = 10) {
