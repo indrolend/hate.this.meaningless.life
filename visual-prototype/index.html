@@ -1,0 +1,296 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>CommandHUD — Visual Prototype</title>
+  <style>
+    :root { color-scheme: dark; --ink:#e8eef5; --muted:#7d8997; --cyan:#50e6ff; --lime:#b8f35a; --red:#ff5d73; }
+    * { box-sizing:border-box; }
+    html,body { width:100%; height:100%; margin:0; overflow:hidden; background:#070a0f; font-family:Inter,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif; }
+    body { display:grid; place-items:stretch; }
+    canvas { width:100%; height:100%; display:block; outline:none; }
+    .command-bar { position:fixed; left:50%; bottom:24px; transform:translateX(-50%); width:min(720px,calc(100vw - 40px)); height:58px; display:flex; align-items:center; gap:12px; padding:8px 10px 8px 18px; border:1px solid #26323f; border-radius:18px; background:rgba(12,17,24,.91); box-shadow:0 20px 60px #000b,0 0 0 1px #ffffff08 inset; backdrop-filter:blur(16px); }
+    .prompt { color:var(--cyan); font:700 17px/1 ui-monospace,SFMono-Regular,Consolas,monospace; }
+    input { min-width:0; flex:1; border:0; outline:0; background:transparent; color:var(--ink); font:600 16px/1.4 ui-monospace,SFMono-Regular,Consolas,monospace; caret-color:var(--cyan); }
+    input::placeholder { color:#596574; }
+    button { height:40px; padding:0 17px; border:0; border-radius:12px; color:#081015; background:var(--cyan); font:800 12px/1 system-ui,sans-serif; letter-spacing:.08em; cursor:pointer; }
+    button:disabled { opacity:.45; cursor:default; }
+    .help { position:fixed; right:24px; bottom:98px; color:#657180; font:600 11px/1.5 ui-monospace,monospace; text-align:right; letter-spacing:.04em; }
+    .raw { position:fixed; top:18px; right:18px; width:min(420px,calc(100vw - 36px)); max-height:42vh; padding:18px; overflow:auto; border:1px solid #344252; border-radius:16px; color:#aebac8; background:rgba(8,12,17,.96); box-shadow:0 24px 80px #000c; font:12px/1.6 ui-monospace,monospace; white-space:pre-wrap; transform:translateY(-12px); opacity:0; pointer-events:none; transition:.2s ease; }
+    .raw.open { transform:none; opacity:1; pointer-events:auto; }
+    .sr { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); }
+    @media (max-width:700px) { .help{display:none}.command-bar{bottom:14px}.raw{max-height:35vh} }
+  </style>
+</head>
+<body>
+  <canvas id="stage" tabindex="0" aria-label="CommandHUD visual system map"></canvas>
+  <form class="command-bar" id="commandForm">
+    <span class="prompt">›</span>
+    <label class="sr" for="commandInput">Demo command</label>
+    <input id="commandInput" autocomplete="off" spellcheck="false" placeholder="test  change  commit  push  fail  reset">
+    <button id="runButton" type="submit">RUN</button>
+  </form>
+  <div class="help">ENTER to run · R raw evidence<br>click an object for detail</div>
+  <pre class="raw" id="rawPanel"></pre>
+  <div class="sr" id="liveStatus" aria-live="polite"></div>
+
+  <script>
+  (() => {
+    'use strict';
+    const canvas = document.querySelector('#stage');
+    const ctx = canvas.getContext('2d');
+    const form = document.querySelector('#commandForm');
+    const input = document.querySelector('#commandInput');
+    const runButton = document.querySelector('#runButton');
+    const rawPanel = document.querySelector('#rawPanel');
+    const liveStatus = document.querySelector('#liveStatus');
+    const TAU = Math.PI * 2;
+    const C = { bg:'#070a0f', panel:'#111821', panel2:'#151f2a', line:'#334151', ink:'#e8eef5', muted:'#7d8997', cyan:'#50e6ff', blue:'#5888ff', lime:'#b8f35a', amber:'#ffbd59', red:'#ff5d73', violet:'#b18cff' };
+
+    const initialState = () => ({
+      project:'digital-breakdown-apk', cwd:'.', branch:'agent/playground-physical-traversal', remote:'origin',
+      dirtyFiles:0, tests:0, workflow:null, lastCommand:null, status:'idle', error:null,
+      ahead:1, selected:null, raw:'CommandHUD visual prototype ready.\nNo command has run yet.'
+    });
+    let state = initialState();
+    let busy = false;
+    let particles = [];
+    let pulses = [];
+    let clock = 0;
+    let shake = 0;
+    let layout = {};
+
+    const expressions = { idle:'(._.)', running:'(o_o)', busy:'(O_O)', success:'(^_^)', warning:'(o_!)', failure:'(x_x)', waiting:'(-_-)' };
+    const wait = ms => new Promise(resolve => setTimeout(resolve, ms));
+    const easeOut = t => 1 - Math.pow(1 - t, 3);
+    const mix = (a,b,t) => a + (b-a)*t;
+    const announce = text => { liveStatus.textContent = text; };
+
+    function rounded(x,y,w,h,r=18) {
+      const rr=Math.min(r,w/2,h/2); ctx.beginPath(); ctx.roundRect(x,y,w,h,rr);
+    }
+    function text(value,x,y,size=14,color=C.ink,weight=600,align='left',family='Inter,system-ui,sans-serif') {
+      ctx.fillStyle=color; ctx.font=`${weight} ${size}px ${family}`; ctx.textAlign=align; ctx.textBaseline='middle'; ctx.fillText(value,x,y);
+    }
+    function label(value,x,y,color=C.muted,align='left') { text(value.toUpperCase(),x,y,10,color,800,align,'ui-monospace,Consolas,monospace'); }
+    function glow(color,blur=20) { ctx.shadowColor=color; ctx.shadowBlur=blur; }
+    function clearGlow() { ctx.shadowColor='transparent'; ctx.shadowBlur=0; }
+
+    function card(rect, active=false, accent=C.cyan) {
+      ctx.save();
+      if(active) glow(accent,22);
+      rounded(rect.x,rect.y,rect.w,rect.h,20);
+      ctx.fillStyle=active ? '#17232d' : C.panel; ctx.fill();
+      ctx.lineWidth=1.25; ctx.strokeStyle=active ? accent : '#263240'; ctx.stroke();
+      ctx.restore(); clearGlow();
+    }
+
+    function computeLayout() {
+      const w=canvas.clientWidth, h=canvas.clientHeight;
+      const compact=w<760;
+      const usableH=h-116;
+      if(compact) {
+        const margin=16, gap=12, top=64, cw=(w-margin*2-gap)/2;
+        layout={
+          repo:{x:margin,y:top+108,w:w-margin*2,h:Math.min(190,usableH*.3)},
+          test:{x:margin,y:top,w:cw,h:92}, remote:{x:margin+cw+gap,y:top,w:cw,h:92},
+          files:{x:margin,y:top+354,w:w-margin*2,h:82}, buddy:{x:w/2,y:top+108},
+          title:{x:margin,y:30}, status:{x:w-margin,y:30}
+        };
+      } else {
+        const centerX=w*.48, repoW=Math.min(430,w*.38), repoH=230, repoY=Math.max(130,(usableH-repoH)/2+36);
+        layout={
+          repo:{x:centerX-repoW/2,y:repoY,w:repoW,h:repoH},
+          test:{x:Math.max(28,centerX-repoW/2-236),y:repoY+35,w:188,h:150},
+          remote:{x:Math.min(w-216,centerX+repoW/2+48),y:repoY+35,w:188,h:150},
+          files:{x:centerX-repoW/2+45,y:repoY+repoH+58,w:repoW-90,h:74},
+          buddy:{x:centerX,y:repoY-42}, title:{x:34,y:34}, status:{x:w-34,y:34}
+        };
+      }
+    }
+
+    function connection(a,b,active=false,color=C.cyan) {
+      const ax=a.x+a.w/2, ay=a.y+a.h/2, bx=b.x+b.w/2, by=b.y+b.h/2;
+      const bend=Math.max(50,Math.abs(bx-ax)*.35);
+      ctx.save(); ctx.beginPath(); ctx.moveTo(ax,ay);
+      ctx.bezierCurveTo(ax+(bx>ax?bend:-bend),ay,bx-(bx>ax?bend:-bend),by,bx,by);
+      ctx.lineWidth=active?5:3; ctx.strokeStyle=active?color:'#1e2935'; ctx.lineCap='round';
+      if(active){ ctx.setLineDash([10,12]); ctx.lineDashOffset=-clock*.05; glow(color,15); }
+      ctx.stroke(); ctx.restore(); clearGlow();
+    }
+
+    function drawRepo() {
+      const r=layout.repo, active=['running','busy','success'].includes(state.status);
+      card(r,active,state.status==='success'?C.lime:C.cyan);
+      label('LOCAL REPOSITORY',r.x+24,r.y+28,active?C.cyan:C.muted);
+      text(state.project,r.x+24,r.y+62,Math.min(25,r.w/17),C.ink,800);
+      text(state.cwd,r.x+24,r.y+91,13,C.muted,600,'left','ui-monospace,Consolas,monospace');
+      ctx.fillStyle='#0c1219'; rounded(r.x+22,r.y+116,r.w-44,1,1); ctx.fill();
+      label('BRANCH',r.x+24,r.y+142);
+      const branch=state.branch.length>31?state.branch.slice(0,28)+'…':state.branch;
+      text(branch,r.x+24,r.y+166,13,C.ink,650,'left','ui-monospace,Consolas,monospace');
+      const badgeX=r.x+r.w-78, badgeY=r.y+142;
+      rounded(badgeX,badgeY,54,34,11); ctx.fillStyle=state.status==='failure'?'#351721':state.status==='success'?'#21311b':'#142531'; ctx.fill();
+      text(state.status==='failure'?'FAIL':state.status==='success'?'PASS':state.status==='busy'?'RUN':'LIVE',badgeX+27,badgeY+17,11,state.status==='failure'?C.red:state.status==='success'?C.lime:C.cyan,900,'center');
+      if(state.error) drawErrorToken(r.x+r.w-18,r.y+36);
+    }
+
+    function drawBuddy() {
+      const b=layout.buddy; const expr=expressions[state.status]||expressions.idle;
+      const bob=Math.sin(clock*.004)*(state.status==='idle'?2:5);
+      ctx.save(); if(state.status!=='idle') glow(state.status==='failure'?C.red:state.status==='success'?C.lime:C.cyan,18);
+      rounded(b.x-48,b.y-25+bob,96,50,17); ctx.fillStyle='#18222d'; ctx.fill(); ctx.strokeStyle=state.status==='failure'?C.red:state.status==='success'?C.lime:'#3a4b5e'; ctx.lineWidth=1.4; ctx.stroke();
+      text(expr,b.x,b.y+bob,17,state.status==='failure'?C.red:state.status==='success'?C.lime:C.ink,800,'center','ui-monospace,Consolas,monospace');
+      ctx.restore(); clearGlow();
+      label(state.status,b.x,b.y+39+bob,state.status==='failure'?C.red:state.status==='success'?C.lime:C.muted,'center');
+    }
+
+    function drawTest() {
+      const r=layout.test, active=state.lastCommand==='test'&&busy;
+      card(r,active,C.lime); label('TESTS',r.x+18,r.y+24,active?C.lime:C.muted);
+      text(state.tests?`✓${state.tests}`:'—',r.x+r.w/2,r.y+r.h*.57,state.tests?38:28,state.tests?C.lime:'#536171',900,'center');
+      if(state.tests) label('VERIFIED',r.x+r.w/2,r.y+r.h-20,C.lime,'center');
+    }
+
+    function drawRemote() {
+      const r=layout.remote, active=state.lastCommand==='push'&&busy;
+      card(r,active,C.violet); label('REMOTE',r.x+18,r.y+24,active?C.violet:C.muted);
+      text(state.remote,r.x+18,r.y+55,20,C.ink,800);
+      const synced=state.ahead===0;
+      text(synced?'SYNCED':`+${state.ahead} LOCAL`,r.x+18,r.y+86,13,synced?C.lime:C.amber,800);
+      const y=r.y+r.h-26; ctx.fillStyle='#253141'; rounded(r.x+18,y,r.w-36,5,3); ctx.fill();
+      ctx.fillStyle=synced?C.lime:C.amber; rounded(r.x+18,y,(r.w-36)*(synced?1:.62),5,3); ctx.fill();
+    }
+
+    function drawFiles() {
+      const r=layout.files; card(r,state.dirtyFiles>0,C.amber);
+      label('WORKTREE',r.x+18,r.y+21,state.dirtyFiles?C.amber:C.muted);
+      text(state.dirtyFiles?`Δ${state.dirtyFiles}`:'CLEAN',r.x+r.w-20,r.y+21,14,state.dirtyFiles?C.amber:C.lime,900,'right');
+      text(state.dirtyFiles?'Changes gathered near the repo':'No unresolved file changes',r.x+18,r.y+49,12,C.muted,600);
+    }
+
+    function drawErrorToken(x,y) {
+      ctx.save(); glow(C.red,24); ctx.fillStyle=C.red; ctx.beginPath(); ctx.arc(x,y,19,0,TAU); ctx.fill(); clearGlow();
+      text('!',x,y+1,21,'#19050a',950,'center'); ctx.restore();
+    }
+
+    function drawPersistentError() {
+      if(!state.error) return;
+      const r=layout.repo; const w=Math.min(230,r.w*.72), x=r.x+r.w/2-w/2, y=r.y+r.h+14;
+      rounded(x,y,w,38,12); ctx.fillStyle='#2c121b'; ctx.fill(); ctx.strokeStyle='#6c2635'; ctx.stroke();
+      text('!  '+state.error,x+w/2,y+19,12,C.red,850,'center','ui-monospace,Consolas,monospace');
+    }
+
+    function spawnParticle(kind,from,to,color,labelValue,delay=0,duration=850) {
+      particles.push({kind,from:{...from},to:{...to},color,label:labelValue,born:performance.now()+delay,duration});
+    }
+
+    function updateParticles(now) { particles=particles.filter(p=>now<p.born+p.duration+100); }
+    function drawParticles(now) {
+      for(const p of particles) {
+        if(now<p.born) continue;
+        const t=Math.min(1,(now-p.born)/p.duration), e=easeOut(t);
+        const x=mix(p.from.x,p.to.x,e), baseY=mix(p.from.y,p.to.y,e), y=baseY-Math.sin(t*Math.PI)*42;
+        const scale=t<.15?t/.15:t>.82?(1-t)/.18:1;
+        ctx.save(); ctx.translate(x,y); ctx.scale(Math.max(.08,scale),Math.max(.08,scale)); glow(p.color,18);
+        if(p.kind==='commit'){ctx.rotate(t*4); rounded(-14,-14,28,28,7);ctx.fillStyle=p.color;ctx.fill();text('◆',0,0,13,'#111',900,'center');}
+        else {ctx.beginPath();ctx.arc(0,0,14,0,TAU);ctx.fillStyle=p.color;ctx.fill();text(p.label,0,1,14,'#10151a',950,'center');}
+        ctx.restore(); clearGlow();
+      }
+    }
+
+    function drawHeader() {
+      label('COMMANDHUD / LIVE MODEL',layout.title.x,layout.title.y,C.cyan);
+      text(state.status.toUpperCase(),layout.status.x,layout.status.y,11,state.status==='failure'?C.red:state.status==='success'?C.lime:C.muted,850,'right','ui-monospace,Consolas,monospace');
+      ctx.fillStyle=state.status==='failure'?C.red:state.status==='success'?C.lime:C.cyan; ctx.beginPath(); ctx.arc(layout.status.x-64,layout.status.y,4,0,TAU); ctx.fill();
+    }
+
+    function render(now) {
+      const dpr=Math.min(devicePixelRatio||1,2), w=canvas.clientWidth, h=canvas.clientHeight;
+      if(canvas.width!==Math.round(w*dpr)||canvas.height!==Math.round(h*dpr)){canvas.width=Math.round(w*dpr);canvas.height=Math.round(h*dpr);ctx.setTransform(dpr,0,0,dpr,0,0);computeLayout();}
+      clock=now; updateParticles(now);
+      ctx.clearRect(0,0,w,h);
+      const grad=ctx.createRadialGradient(w*.48,h*.43,20,w*.48,h*.43,Math.max(w,h)*.7);grad.addColorStop(0,'#111923');grad.addColorStop(.55,C.bg);grad.addColorStop(1,'#05070b');ctx.fillStyle=grad;ctx.fillRect(0,0,w,h);
+      ctx.save(); if(shake>0){ctx.translate((Math.random()-.5)*shake,(Math.random()-.5)*shake);shake*=.9;if(shake<.2)shake=0;}
+      connection(layout.test,layout.repo,state.lastCommand==='test'&&busy,C.lime);
+      connection(layout.repo,layout.remote,state.lastCommand==='push'&&busy,C.violet);
+      drawHeader(); drawTest(); drawRemote(); drawRepo(); drawFiles(); drawBuddy(); drawPersistentError(); drawParticles(now);
+      ctx.restore();
+      requestAnimationFrame(render);
+    }
+
+    function setState(patch,eventName) {
+      state={...state,...patch};
+      if(eventName) pulses.push({event:eventName,at:Date.now()});
+      window.dispatchEvent(new CustomEvent('commandhud:event',{detail:{type:eventName,state:{...state}}}));
+    }
+
+    async function start(command) {
+      setState({lastCommand:command,status:'running',error:null,raw:`> ${command}\ncommand.start\nProcess attached to semantic event stream.`},'command.start');
+      announce(`${command} started`); await wait(420); setState({status:'busy'},'command.busy');
+    }
+    async function finish(status='success') {
+      await wait(420); setState({status},'command.finish'); busy=false; runButton.disabled=false; input.disabled=false; input.focus(); announce(`${state.lastCommand} ${status}`);
+    }
+
+    async function run(command) {
+      command=String(command||'').trim().toLowerCase(); if(!command||busy)return;
+      busy=true; runButton.disabled=true; input.disabled=true;
+      if(command==='reset'){state=initialState();particles=[];rawPanel.classList.remove('open');busy=false;runButton.disabled=false;input.disabled=false;input.focus();announce('State reset');return;}
+      await start(command);
+      const repo=layout.repo,test=layout.test,remote=layout.remote,files=layout.files;
+      if(command==='test') {
+        setState({tests:0,raw:'> npm run hud:test\nTAP version 13\n21 tests discovered\nRunning focused semantic contracts…'},'test.start');
+        for(let i=0;i<7;i++) spawnParticle('check',{x:test.x+test.w*.45,y:test.y+test.h*.55},{x:test.x+test.w*.58,y:test.y+test.h*.55},C.lime,'✓',i*95,620);
+        await wait(1050); setState({tests:21,raw:'> npm run hud:test\n21 tests passed\n0 tests failed\nduration 8.9s\n\nReduced: ✓21'},'test.pass');
+        await finish('success');
+      } else if(command==='change') {
+        for(let i=0;i<2;i++) spawnParticle('delta',{x:repo.x+repo.w*.5,y:repo.y+repo.h*.6},{x:files.x+files.w*.65+i*22,y:files.y+files.h*.5},C.amber,'Δ',i*130,700);
+        await wait(850); setState({dirtyFiles:2,status:'warning',raw:'> simulated watcher\nM tools/hud/core.mjs\nM tools/hud/visual-prototype/index.html\n\nReduced: Δ2'},'file.change');
+        await finish('warning');
+      } else if(command==='commit') {
+        spawnParticle('commit',{x:files.x+files.w*.5,y:files.y+files.h*.45},{x:repo.x+repo.w*.76,y:repo.y+repo.h*.63},C.cyan,'◆',0,900);
+        await wait(980); setState({dirtyFiles:0,ahead:Math.max(1,state.ahead),raw:'> git commit\n[prototype abc1234] Gather visual state\n2 files changed\n\nReduced: ◆ commit formed'},'git.commit');
+        await finish('success');
+      } else if(command==='push') {
+        if(state.ahead===0) setState({ahead:1});
+        spawnParticle('commit',{x:repo.x+repo.w*.62,y:repo.y+repo.h*.5},{x:remote.x+remote.w*.48,y:remote.y+remote.h*.5},C.violet,'◆',0,1350);
+        await wait(1450); setState({ahead:0,raw:'> git push origin branch\nObjects transferred\nRemote advanced\n\nReduced: local = remote'},'git.push');
+        await finish('success');
+      } else if(command==='fail') {
+        spawnParticle('error',{x:repo.x+repo.w*.5,y:repo.y+repo.h*.6},{x:repo.x+repo.w-18,y:repo.y+36},C.red,'!',0,700);
+        await wait(720); shake=14; setState({error:'MODULE MISSING',status:'failure',raw:"> node app.mjs\nError [ERR_MODULE_NOT_FOUND]: Cannot find package 'example-module'\n    at packageResolve (node:internal/modules/esm/resolve:...)\n    at moduleResolve (...)\n\nReduced: ! MODULE MISSING"},'error.MODULE_MISSING');
+        await wait(650); busy=false;runButton.disabled=false;input.disabled=false;input.focus();announce('Failure: module missing');
+      } else if(command==='workflow') {
+        setState({workflow:{name:'visual contract',current:1,count:1,status:'PASS'},raw:'> hud workflow visual-contract\nWORKFLOW=visual contract\nSTATUS=PASS\nCURRENT=1/1\nNEXT=none'},'workflow.complete');
+        for(let i=0;i<4;i++)spawnParticle('check',{x:repo.x+repo.w*.5,y:repo.y+repo.h*.5},{x:repo.x+repo.w*.78,y:repo.y+repo.h*.72},C.lime,'✓',i*90,650);
+        await finish('success');
+      } else {
+        setState({error:'COMMAND UNKNOWN',status:'warning',raw:`> ${command}\nUnknown demo command.\nTry: test change commit push fail workflow reset`},'command.unknown');
+        await finish('warning');
+      }
+    }
+
+    function hit(rect,x,y){return rect&&x>=rect.x&&x<=rect.x+rect.w&&y>=rect.y&&y<=rect.y+rect.h;}
+    canvas.addEventListener('click',e=>{
+      const p={x:e.clientX,y:e.clientY}; let selected=null;
+      for(const name of ['repo','test','remote','files'])if(hit(layout[name],p.x,p.y))selected=name;
+      if(selected){state.selected=selected;rawPanel.textContent=state.raw+`\n\nINSPECT=${selected.toUpperCase()}\nCurrent state is derived, not appended.`;rawPanel.classList.add('open');}
+    });
+    window.addEventListener('keydown',e=>{if(e.key.toLowerCase()==='r'&&document.activeElement!==input){rawPanel.textContent=state.raw;rawPanel.classList.toggle('open');}});
+    form.addEventListener('submit',e=>{e.preventDefault();const value=input.value;input.value='';run(value);});
+    input.addEventListener('keydown',e=>{if(e.key==='Enter'){e.preventDefault();form.requestSubmit();}});
+
+    window.commandHudDemo={
+      run,
+      getState:()=>JSON.parse(JSON.stringify(state)),
+      getEvents:()=>JSON.parse(JSON.stringify(pulses)),
+      isBusy:()=>busy,
+      reset:()=>run('reset')
+    };
+    computeLayout(); requestAnimationFrame(render); setTimeout(()=>input.focus(),100);
+  })();
+  </script>
+</body>
+</html>
