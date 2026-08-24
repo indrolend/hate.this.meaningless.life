@@ -14,6 +14,26 @@ This exposes the repository's `hud` bin through npm's user-level binary director
 
 Without linking, use `npm run hud -- <command>`.
 
+## Windows desktop launcher
+
+Double-click `CommandHUD.cmd` at the repository root, or run:
+
+```powershell
+node tools/hud/cli.mjs desktop
+```
+
+The launcher verifies the repository, acquires one desktop-instance lock for it, starts the same loopback-only authoritative HUD server on an available port, and opens the renderer in a dedicated Microsoft Edge or Google Chrome app-mode window. Closing that window stops the owned server and releases the lock. A stale lock from a dead launcher is replaced; a live owner blocks a second desktop instance.
+
+The browser receives only the local URL and uses a CommandHUD-owned profile under `%LOCALAPPDATA%\CommandHud\desktop\profiles`. The existing typed-operation and evidence boundaries are unchanged; the launcher does not add arbitrary browser shell execution or another state model. Startup recovery runs before the application window opens, so corrupt or still-active detached evidence fails closed with a terminal-visible explanation.
+
+This is the first thin Windows host, not the final packaged `CommandHUD.exe`. It deliberately reuses an installed Chromium app-mode host to prove repository selection, single-instance ownership, runtime lifetime, and standalone-window behavior without adding Electron. A later WebView2 executable can replace this host while retaining the same server/core contract.
+
+### Historical prototype relationship
+
+The earlier Windows Forms prototype remains in the separate `hate.this.meaningless.life` repository at `legacy/commandhud/CommandHud-v21-corebridge.ps1`. It established useful interaction behavior: persistent cwd, focused command input, Enter-to-run, streaming output, Stop, copy, and local command recall. Those are product references, not a second authority.
+
+The DATA core supersedes the prototype's session JSONL/log ownership and PowerShell-runspace execution with verified repository identity, immutable runs, typed browser operations, evidence currency, cancellation, recovery, and Undo. The desktop launcher does not invoke or copy the legacy execution layer. Features should migrate by expressing their intent through the DATA runtime rather than maintaining two histories or state models.
+
 ## Workflow
 
 ```text

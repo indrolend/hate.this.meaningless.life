@@ -130,6 +130,24 @@ async function main() {
     console.log(`DIRECTORIES=${value.repository.directoryCount}`);
     return;
   }
+  if (command === 'desktop') {
+    if (process.platform !== 'win32') throw new Error('The current CommandHUD desktop host is Windows-only. Use hud serve on this platform.');
+    const { startDesktopHud } = await import('./desktop.mjs');
+    const desktop = await startDesktopHud(project);
+    console.log(`COMMANDHUD_DESKTOP=${desktop.url}`);
+    console.log(`ROOT=${project.root}`);
+    console.log(`HOST=${desktop.browser}`);
+    if (desktop.recovery.recovered.length) console.log(`RECOVERED_INTERRUPTED=${desktop.recovery.recovered.join(',')}`);
+    const stop = () => void desktop.close({ terminateBrowser: true });
+    process.once('SIGINT', stop);
+    process.once('SIGTERM', stop);
+    try { await desktop.wait(); }
+    finally {
+      process.removeListener('SIGINT', stop);
+      process.removeListener('SIGTERM', stop);
+    }
+    return;
+  }
   if (command === 'serve') {
     if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65535) throw new Error('hud serve requires a valid --port.');
     const { startHudServer } = await import('./server.mjs');
