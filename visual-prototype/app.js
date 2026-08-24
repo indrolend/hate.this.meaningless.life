@@ -12,6 +12,8 @@
     }
   } catch {}
   const repository = state?.repository;
+  const search = state?.lastOperation?.type === 'search' ? state.lastOperation : null;
+  const searchFiles = new Map((search?.files || []).map((file) => [file.path, file]));
   const app = $('#app');
   const viewport = $('#viewport');
   const world = $('#world');
@@ -38,6 +40,11 @@
       ['Current semantic state', 'Inspect the complete derived HUD snapshot.', 'node tools/hud/cli.mjs state --json', 'HUD'],
       ['Repository tree', 'Inspect the Git-backed repository projection.', 'node tools/hud/cli.mjs tree', 'HUD'],
       ['Refresh visual snapshot', 'Regenerate the ignored browser-state bridge.', 'node tools/hud/cli.mjs visual-state', 'HUD'],
+    ],
+    Search: [
+      ['Search repository', 'Run a literal ripgrep search and preserve its evidence.', 'node tools/hud/cli.mjs search "query" .', 'repository'],
+      ['Search HUD', 'Limit a real search to CommandHUD sources.', 'node tools/hud/cli.mjs search "query" tools/hud', 'tools/hud'],
+      ['Copy last handoff', 'Copy the compact context for the last structured operation.', 'node tools/hud/cli.mjs handoff --copy', 'HUD'],
     ],
     Git: [
       ['Repository status', 'Show branch and concise worktree state.', 'git status --short --branch', 'repository'],
@@ -77,6 +84,12 @@
     return count;
   }
 
+  function directorySearchCount(directory) {
+    let count = directory.files.reduce((sum, file) => sum + (searchFiles.get(file.path)?.count || 0), 0);
+    for (const child of directory.directories) count += directorySearchCount(child);
+    return count;
+  }
+
   function applyCamera() {
     world.style.transform = `translate(${camera.x}px,${camera.y}px) scale(${camera.z})`;
   }
@@ -104,22 +117,24 @@
   function treeDirectory(directory, depth, fragment) {
     if (directory.path) {
       const row = document.createElement('button');
-      row.className = `tree-row${currentDirectory === directory.path ? ' selected' : ''}`;
+      const matchCount = directorySearchCount(directory);
+      row.className = `tree-row${currentDirectory === directory.path ? ' selected' : ''}${matchCount ? ' search-match' : ''}`;
       row.dataset.directory = directory.path;
       row.dataset.depth = String(depth);
       row.style.paddingLeft = `${8 + depth * 15}px`;
-      row.innerHTML = `<span class="twisty">${openDirectories.has(directory.path) ? '▾' : '▸'}</span><span class="folder-dot"></span><span>${directory.name}</span>`;
+      row.innerHTML = `<span class="twisty">${openDirectories.has(directory.path) ? '▾' : '▸'}</span><span class="folder-dot"></span><span>${directory.name}</span>${matchCount ? `<span class="match-count">${matchCount}</span>` : ''}`;
       fragment.appendChild(row);
       if (!openDirectories.has(directory.path)) return;
     }
     for (const child of directory.directories) treeDirectory(child, depth + (directory.path ? 1 : 0), fragment);
     for (const file of directory.files) {
       const row = document.createElement('button');
-      row.className = `tree-row${selected?.path === file.path ? ' selected' : ''}`;
+      const match = searchFiles.get(file.path);
+      row.className = `tree-row${selected?.path === file.path ? ' selected' : ''}${match ? ' search-match' : ''}`;
       row.dataset.file = file.path;
       row.dataset.depth = String(depth + (directory.path ? 1 : 0));
       row.style.paddingLeft = `${23 + (depth + (directory.path ? 1 : 0)) * 15}px`;
-      row.innerHTML = `<span class="twisty"></span><span class="file-dot"></span><span>${file.name}</span>${file.gitStatus ? `<span class="changed">${file.gitStatus.trim() || 'M'}</span>` : ''}`;
+      row.innerHTML = `<span class="twisty"></span><span class="file-dot"></span><span>${file.name}</span>${match ? `<span class="match-count">${match.count}</span>` : file.gitStatus ? `<span class="changed">${file.gitStatus.trim() || 'M'}</span>` : ''}`;
       fragment.appendChild(row);
     }
   }
@@ -175,11 +190,15 @@
       button.className = `node${selected?.path === path ? ' selected' : ''}`;
       button.style.cssText = `left:${x}px;top:${y}px;width:${cardWidth}px`;
       if (item.type === 'directory') {
+        const matchCount = directorySearchCount(item.value);
+        if (matchCount) button.classList.add('search-match');
         button.dataset.directory = path;
-        button.innerHTML = `<span class="node-name">▰ ${item.value.name}</span><span class="node-kind">${item.value.directories.length}d · ${item.value.files.length}f · ${descendants(item.value)} total</span>`;
+        button.innerHTML = `<span class="node-name">▰ ${item.value.name}</span><span class="node-kind">${item.value.directories.length}d · ${item.value.files.length}f · ${descendants(item.value)} total${matchCount ? ` · ${matchCount} matches` : ''}</span>`;
       } else {
+        const match = searchFiles.get(path);
+        if (match) button.classList.add('search-match');
         button.dataset.file = path;
-        button.innerHTML = `<span class="node-name">${item.value.name}</span><span class="node-kind">${item.value.kind} · ${formatSize(item.value.size)}</span>${item.value.gitStatus ? '<span class="mark"></span>' : ''}`;
+        button.innerHTML = `<span class="node-name">${item.value.name}</span><span class="node-kind">${item.value.kind} · ${formatSize(item.value.size)}${match ? ` · ${match.count} matches` : ''}</span>${item.value.gitStatus ? '<span class="mark"></span>' : ''}`;
       }
       region.appendChild(button);
     });
@@ -222,7 +241,8 @@
     $('#focusSummary').textContent = 'File information from the current Git and filesystem snapshot.';
     renderMedia(file);
     const status = file.gitStatus === '??' ? 'untracked' : file.gitStatus ? file.gitStatus : 'unchanged';
-    $('#focusFacts').innerHTML = `<div class="fact"><div class="fact-label">Type</div><div class="fact-value">${file.kind}</div></div><div class="fact"><div class="fact-label">Size</div><div class="fact-value">${formatSize(file.size)}</div></div><div class="fact"><div class="fact-label">Git</div><div class="fact-value">${status}</div></div>`;
+    const match = searchFiles.get(file.path);
+    $('#focusFacts').innerHTML = `<div class="fact"><div class="fact-label">Type</div><div class="fact-value">${file.kind}</div></div><div class="fact"><div class="fact-label">Size</div><div class="fact-value">${formatSize(file.size)}</div></div><div class="fact"><div class="fact-label">Git</div><div class="fact-value">${status}</div></div>${match ? `<div class="fact search-fact"><div class="fact-label">Search matches</div><div class="fact-value">${match.count}</div></div><div class="fact search-fact"><div class="fact-label">Actual lines</div><div class="fact-value">${match.lines.join(', ')}</div></div>` : ''}`;
     focus.classList.add('open');
     focus.setAttribute('aria-hidden', 'false');
     if (fly) {
@@ -323,6 +343,10 @@
   }
 
   indexDirectory(repository.root);
+  if (search?.scope && search.scope !== '.' && directoriesByPath.has(search.scope)) {
+    currentDirectory = search.scope;
+    openDirectories.add(search.scope);
+  }
   $('.brand').textContent = state.project.name;
   $('.branch').textContent = state.git.branch;
   $('#branchValue').textContent = state.git.branch;
@@ -331,6 +355,13 @@
   $('#changeCount').className = countChanged() ? 'warn' : 'good';
   $('#snapshotState').textContent = state.git.head.slice(0, 7);
   $('#snapshotState').className = state.git.dirty ? 'warn' : 'good';
+  if (search) {
+    $('#searchState').textContent = `${search.matchCount} / ${search.fileCount}`;
+    $('#searchState').className = search.matchCount ? 'search-text' : 'good';
+    output.classList.add('open');
+    $('#outputTitle').textContent = `Search: ${search.query}`;
+    $('#outputText').textContent = `${search.command}\n\n${search.matchCount} matches in ${search.fileCount} files\n${search.files.map((file) => `${file.path}  ${file.count}  lines ${file.lines.join(',')}`).join('\n')}\n\nRaw evidence: run:${state.last?.runId || 'unknown'}`;
+  }
 
   treeList.addEventListener('click', (event) => {
     const button = event.target.closest('button');
@@ -451,5 +482,6 @@
     closeFocus,
     togglePicker,
     getState: () => ({ currentDirectory, selected: selected?.path || null, camera: { ...camera } }),
+    getSearch: () => search,
   };
 })();

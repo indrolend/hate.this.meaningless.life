@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, searchRepository, buildOperationHandoff, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 function parse(argv) {
   const args = [...argv];
@@ -137,6 +137,38 @@ async function main() {
     console.log(`HUD_URL=http://${running.host}:${running.port}/`);
     console.log(`ROOT=${project.root}`);
     console.log('MODE=READ_ONLY');
+    return;
+  }
+  if (command === 'search') {
+    const query = args[0];
+    const scope = args[1] || '.';
+    const record = await searchRepository(project, query, scope);
+    if (options.json) {
+      console.log(JSON.stringify({
+        runId: record.id, status: record.status, operation: record.operation,
+        stdoutPath: record.stdoutPath, stderrPath: record.stderrPath,
+        currency: record.currencyAfter,
+      }, null, 2));
+    } else {
+      const result = record.operation;
+      console.log(`SEARCH ${result.query}`);
+      console.log(`SCOPE ${result.scope}`);
+      console.log(`TOOL ${result.tool}${result.toolAvailable ? '' : ' unavailable'}`);
+      console.log(`COMMAND ${result.command}`);
+      console.log(`MATCHES ${result.matchCount}`);
+      console.log(`FILES ${result.fileCount}`);
+      for (const file of result.files) console.log(`${file.path} ${file.count} lines=${file.lines.join(',')}`);
+      console.log(`RAW run:${record.id}`);
+    }
+    process.exitCode = record.status === 'pass' ? 0 : record.status === 'blocked' ? 2 : 1;
+    return;
+  }
+  if (command === 'handoff') {
+    const record = lastRun(project);
+    if (!record) throw new Error('No recorded run exists for this project.');
+    const handoff = buildOperationHandoff(project, record);
+    console.log(handoff);
+    if (options.copy) copy(handoff);
     return;
   }
   if (command === 'continue') {

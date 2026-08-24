@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { resolveProject } from './core.mjs';
+import { resolveProject, searchRepository } from './core.mjs';
 import { startHudServer } from './server.mjs';
 
 function fixtureProject() {
@@ -33,6 +33,7 @@ function fixtureProject() {
 
 test('read-only HUD server exposes live state, tree, static UI, and byte-range media', async (t) => {
   const project = await fixtureProject();
+  await searchRepository(project, 'RIFF', 'media');
   const running = await startHudServer(project, { port: 0 });
   t.after(() => new Promise((resolveClose) => running.server.close(resolveClose)));
   const base = `http://127.0.0.1:${running.port}`;
@@ -42,6 +43,8 @@ test('read-only HUD server exposes live state, tree, static UI, and byte-range m
   assert.match(stateResponse.headers.get('content-type'), /application\/json/);
   const state = await stateResponse.json();
   assert.equal(state.project.id, 'indrolend/data');
+  assert.equal(state.lastOperation.type, 'search');
+  assert.deepEqual(state.lastOperation.files, [{ path: 'media/tone.wav', count: 1, lines: [1] }]);
   assert.ok(state.repository.root.directories.some((directory) => directory.path === 'media'));
 
   const treeResponse = await fetch(`${base}/tree`);

@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, fetchUpdate, formatPacket, gitSnapshot, readProjectState, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runCommand, setWorkingValue, workingValue, workflowView } from './core.mjs';
+import { buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, fetchUpdate, formatPacket, gitSnapshot, parseSearchOutput, readProjectState, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runCommand, searchRepository, setWorkingValue, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -374,6 +374,47 @@ test('repository tree projects real hierarchy, changes, and ignored-file boundar
   assert.equal(src.files.find((file) => file.name === 'alpha.js').gitStatus, ' M');
   assert.equal(src.files.find((file) => file.name === 'untracked.js').gitStatus, '??');
   assert.equal(first.root.directories.some((directory) => directory.name === 'ignored'), false);
+});
+
+test('search records real scoped matches, truthful zero results, raw evidence, and one compact handoff model', async () => {
+  const project = await fixtureProject();
+  mkdirSync(join(project.root, 'src'));
+  writeFileSync(join(project.root, 'src', 'alpha.txt'), 'needle first\nplain\nneedle third\n');
+  writeFileSync(join(project.root, 'src', 'beta.txt'), 'needle only\n');
+  writeFileSync(join(project.root, 'outside.txt'), 'needle outside scope\n');
+
+  const record = await searchRepository(project, 'needle', 'src');
+  assert.equal(record.status, 'pass');
+  assert.equal(record.operation.matchCount, 3);
+  assert.equal(record.operation.fileCount, 2);
+  assert.deepEqual(record.operation.files, [
+    { path: 'src/alpha.txt', count: 2, lines: [1, 3] },
+    { path: 'src/beta.txt', count: 1, lines: [1] },
+  ]);
+  assert.match(readFileSync(record.stdoutPath, 'utf8'), /src[\\/]alpha\.txt:1:needle first/);
+  assert.equal(readFileSync(record.stderrPath, 'utf8'), '');
+  assert.deepEqual(parseSearchOutput(readFileSync(record.stdoutPath, 'utf8')), {
+    matches: record.operation.matchCount,
+    files: record.operation.files,
+  });
+  const state = await currentState(project);
+  assert.deepEqual(state.lastOperation, record.operation);
+  const handoff = buildOperationHandoff(project, record);
+  assert.match(handoff, new RegExp(`RAW run:${record.id}`));
+  assert.match(handoff, /src\/alpha\.txt 2 lines=1,3/);
+  assert.ok(handoff.length < readFileSync(record.stdoutPath, 'utf8').length + 600);
+
+  const zero = await searchRepository(project, 'definitely-not-present', 'src');
+  assert.equal(zero.status, 'pass');
+  assert.equal(zero.exitCode, 1);
+  assert.deepEqual(zero.operation.files, []);
+  assert.equal(zero.operation.matchCount, 0);
+
+  const failed = await searchRepository(project, 'needle', 'src', { tool: process.execPath });
+  assert.equal(failed.status, 'fail');
+  assert.equal(failed.operation.matchCount, 0);
+  assert.notEqual(failed.exitCode, 0);
+  assert.notEqual(readFileSync(failed.stderrPath, 'utf8'), '');
 });
 
 test('evidence currency is current, stale, or unknown', () => {

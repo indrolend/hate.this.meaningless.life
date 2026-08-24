@@ -439,10 +439,12 @@ export function buildPacket(record) {
     AUTHORITY: `${record.gitAfter.head} branch=${record.gitAfter.branch} dirty=${record.gitAfter.dirty}`,
     CHANGE: change,
     VERIFY: verify,
-    RESULT: record.exitCode === 0 ? 'requested command completed' : `command exited ${record.exitCode}`,
+    RESULT: record.operation?.type === 'search' && record.status === 'pass'
+      ? `${record.operation.matchCount} matches / ${record.operation.fileCount} files`
+      : record.exitCode === 0 ? 'requested command completed' : `command exited ${record.exitCode}`,
   };
   if (record.reduction.cause) packet.CAUSE = `${record.reduction.classification}: ${record.reduction.cause}`;
-  packet.FRONTIER = record.exitCode === 0 ? 'select the next bounded objective' : `inspect ${record.stdoutPath} and ${record.stderrPath}`;
+  packet.FRONTIER = record.status === 'pass' ? 'select the next bounded objective' : `inspect ${record.stdoutPath} and ${record.stderrPath}`;
   return packet;
 }
 
@@ -450,7 +452,10 @@ export function formatPacket(packet) {
   return Object.entries(packet).map(([key, value]) => `${key}=${value}`).join('\n');
 }
 
-export async function runCommand(project, tokens, { objective, stream = true, request = null, workflow = null } = {}) {
+export async function runCommand(project, tokens, {
+  objective, stream = true, request = null, workflow = null,
+  acceptedExitCodes = [0], operationReducer = null,
+} = {}) {
   if (!tokens.length) throw new Error('hud run requires a command.');
   const command = tokens.map((token) => /[\s"']/.test(token) ? JSON.stringify(token) : token).join(' ');
   const [before, currencyBefore] = await Promise.all([gitSnapshot(project.root), repositoryCurrency(project.root)]);
@@ -483,6 +488,7 @@ export async function runCommand(project, tokens, { objective, stream = true, re
   const [after, currencyAfter] = await Promise.all([gitSnapshot(project.root), repositoryCurrency(project.root)]);
   const reduction = reduceOutput(command, stdout, stderr, exitCode, { root: project.root });
   const missingCommand = exitCode !== 0 && /(?:command not found|is not recognized as (?:a name of |the name of )?a? ?(?:cmdlet|function|script file|executable program)|ENOENT)/i.test(normalizeTerminalText(`${stdout}\n${stderr}`));
+  const accepted = acceptedExitCodes.includes(exitCode);
   const record = {
     schemaVersion: SCHEMA_VERSION, id, project: project.identity.id, root: project.root,
     branch: before.branch, headBefore: before.head, headAfter: after.head, upstream: before.upstream,
@@ -495,12 +501,13 @@ export async function runCommand(project, tokens, { objective, stream = true, re
       count: Number.isInteger(workflow.count) ? workflow.count : null,
     } : null,
     startedAt: started.toISOString(), endedAt: ended.toISOString(), durationMs: ended - started,
-    exitCode, status: exitCode === 0 ? 'pass' : missingCommand ? 'blocked' : 'fail',
+    exitCode, status: accepted ? 'pass' : missingCommand ? 'blocked' : 'fail',
     dirtyBefore: before.dirty, dirtyAfter: after.dirty,
     changedFiles: after.changedFiles, gitBefore: before, gitAfter: after,
     currencyBefore, currencyAfter,
     stdoutPath, stderrPath, reducer: reduction.reducer, reduction,
   };
+  if (operationReducer) record.operation = operationReducer({ stdout, stderr, exitCode, command, record });
   record.presentation = buildPresentation(record);
   record.packet = buildPacket(record);
   writeFileSync(join(runDirectory, 'run.json'), `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx' });
@@ -508,6 +515,77 @@ export async function runCommand(project, tokens, { objective, stream = true, re
   state.lastRunId = id;
   writeProjectState(project, state);
   return record;
+}
+
+export function parseSearchOutput(stdout) {
+  const byPath = new Map();
+  for (const row of String(stdout || '').split(/\r?\n/)) {
+    if (!row) continue;
+    const match = row.match(/^(.*?):(\d+):(.*)$/);
+    if (!match) continue;
+    const path = match[1].replaceAll('\\', '/');
+    const line = Number(match[2]);
+    if (!Number.isInteger(line)) continue;
+    if (!byPath.has(path)) byPath.set(path, { path, count: 0, lines: [] });
+    const file = byPath.get(path);
+    file.count++;
+    file.lines.push(line);
+  }
+  const files = [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path, 'en'));
+  return { matches: files.reduce((sum, file) => sum + file.count, 0), files };
+}
+
+function repositoryScope(root, requested = '.') {
+  const scope = String(requested || '.').replaceAll('\\', '/').replace(/^\.\//, '') || '.';
+  const target = resolve(root, ...scope.split('/'));
+  const inside = relative(root, target);
+  if (isAbsolute(inside) || inside === '..' || inside.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)) {
+    throw new Error(`Search scope is outside the verified repository: ${requested}`);
+  }
+  if (!existsSync(target)) throw new Error(`Search scope does not exist: ${requested}`);
+  return scope;
+}
+
+export async function searchRepository(project, query, scope = '.', { stream = false, tool = 'rg' } = {}) {
+  if (!String(query || '')) throw new Error('hud search requires a query.');
+  const selectedScope = repositoryScope(project.root, scope);
+  const availability = await exec(tool, ['--version'], project.root);
+  const tokens = [tool, '-n', '--no-heading', '--color', 'never', '--fixed-strings', '--', String(query), selectedScope];
+  return runCommand(project, tokens, {
+    request: `search ${query} in ${selectedScope}`,
+    objective: `Find ${query} in ${selectedScope}`,
+    stream,
+    acceptedExitCodes: [0, 1],
+    operationReducer: ({ stdout, exitCode, command }) => {
+      const result = exitCode <= 1 ? parseSearchOutput(stdout) : { matches: 0, files: [] };
+      return {
+        type: 'search', query: String(query), scope: selectedScope,
+        tool, toolAvailable: availability.ok, command, exitCode,
+        matchCount: result.matches, fileCount: result.files.length, files: result.files,
+      };
+    },
+  });
+}
+
+export function buildOperationHandoff(project, record) {
+  if (!record?.operation) throw new Error('The last run has no structured operation to hand off.');
+  const operation = record.operation;
+  const lines = [
+    `REPO ${basename(project.root)}`,
+    `BRANCH ${record.gitAfter?.branch || record.branch}`,
+    `CWD ${operation.scope || '.'}`,
+    '',
+    `OPERATION ${operation.type.toUpperCase()}`,
+  ];
+  if (operation.type === 'search') {
+    lines.push(`QUERY ${operation.query}`);
+    lines.push(`COMMAND ${operation.command}`);
+    lines.push(`RESULT ${operation.matchCount} matches / ${operation.fileCount} files`);
+    lines.push('', 'FILES');
+    for (const file of operation.files) lines.push(`${file.path} ${file.count} lines=${file.lines.join(',')}`);
+  }
+  lines.push('', `RAW run:${record.id}`, `STDOUT ${record.stdoutPath}`, `STDERR ${record.stderrPath}`);
+  return lines.join('\n');
 }
 
 export function workflowView(project, workflowId, limit = 100) {
@@ -674,6 +752,7 @@ export async function currentState(project, { cwd = process.cwd() } = {}) {
       durationMs: last.durationMs,
       headline: last.presentation?.headline || last.reduction?.cause || null,
     } : null,
+    lastOperation: last?.operation || null,
     next: workflow?.nextStage ?? null,
     status: workflow?.status || last?.status || 'idle',
   };
