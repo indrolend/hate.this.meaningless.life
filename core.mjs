@@ -529,7 +529,7 @@ export function parseSearchOutput(stdout) {
     if (!row) continue;
     const match = row.match(/^(.*?):(\d+):(.*)$/);
     if (!match) continue;
-    const path = match[1].replaceAll('\\', '/');
+    const path = match[1].replaceAll('\\', '/').replace(/^\.\//, '');
     const line = Number(match[2]);
     if (!Number.isInteger(line)) continue;
     if (!byPath.has(path)) byPath.set(path, { path, count: 0, lines: [] });

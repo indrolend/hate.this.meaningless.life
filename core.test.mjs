@@ -422,6 +422,16 @@ test('search records real scoped matches, truthful zero results, raw evidence, a
   assert.match(readFileSync(unavailable.stderrPath, 'utf8'), /ENOENT|not found/i);
 });
 
+test('search result paths share repository projection identity at root scope', () => {
+  assert.deepEqual(parseSearchOutput('./src/alpha.txt:4:needle\r\n.\\src\\beta.txt:7:needle\r\n'), {
+    matches: 2,
+    files: [
+      { path: 'src/alpha.txt', count: 1, lines: [4] },
+      { path: 'src/beta.txt', count: 1, lines: [7] },
+    ],
+  });
+});
+
 test('evidence currency is current, stale, or unknown', () => {
   const current = { head: 'a', worktreeFingerprint: 'sha256:one' };
   assert.equal(classifyEvidence(current, current), 'CURRENT');

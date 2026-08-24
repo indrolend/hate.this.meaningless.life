@@ -47,6 +47,13 @@ test('HUD server exposes live reads, typed Search, and byte-range media without 
   assert.deepEqual(state.lastOperation.files, [{ path: 'media/tone.wav', count: 1, lines: [1] }]);
   assert.ok(state.repository.root.directories.some((directory) => directory.path === 'media'));
 
+  const handoffResponse = await fetch(`${base}/handoff`);
+  assert.equal(handoffResponse.status, 200);
+  const handoff = await handoffResponse.json();
+  assert.equal(handoff.runId, state.last.runId);
+  assert.match(handoff.handoff, new RegExp(`RAW run:${state.last.runId}`));
+  assert.match(handoff.handoff, /media\/tone\.wav 1 lines=1/);
+
   const sourceResponse = await fetch(`${base}/source?path=${encodeURIComponent('media/tone.wav')}&context=0`);
   assert.equal(sourceResponse.status, 200);
   const source = await sourceResponse.json();

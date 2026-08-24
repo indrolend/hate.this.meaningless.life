@@ -43,8 +43,8 @@
       ['Refresh visual snapshot', 'Regenerate the ignored browser-state bridge.', 'node tools/hud/cli.mjs visual-state', 'HUD'],
     ],
     Search: [
-      ['Search repository', 'Run a recorded literal search across the repository.', 'search "query" .', 'repository'],
-      ['Search current directory', 'Run a recorded literal search in the visible map scope.', 'search "query" {current}', 'current directory'],
+      ['Search repository', 'Run a recorded literal search across the repository.', 'search "" .', 'repository'],
+      ['Search current directory', 'Run a recorded literal search in the visible map scope.', 'search "" {current}', 'current directory'],
       ['Copy last handoff', 'Copy the compact context for the last structured operation.', 'node tools/hud/cli.mjs handoff --copy', 'HUD'],
     ],
     Git: [
@@ -384,16 +384,28 @@
   function typedSearch(value) {
     const match = String(value || '').match(/^search\s+(?:"([^"]*)"|'([^']*)'|(\S+))(?:\s+(\S+))?\s*$/i);
     if (!match) return null;
-    return { query: match[1] ?? match[2] ?? match[3], scope: match[4] || '.' };
+    const query = match[1] ?? match[2] ?? match[3];
+    return query ? { query, scope: match[4] || '.' } : null;
   }
 
   function previewInput() {
     const operation = typedSearch(input.value);
-    $('.run').textContent = liveState && operation ? 'Search' : 'Copy';
-    if (!operation) return;
+    const searchIntent = /^\s*search(?:\s|$)/i.test(input.value);
+    $('.run').disabled = searchIntent && !operation;
+    $('.run').textContent = searchIntent ? 'Search' : 'Copy';
+    if (!operation) {
+      if (searchIntent) {
+        output.classList.add('open');
+        $('#outputTitle').textContent = 'Complete the Search request';
+        $('#outputText').textContent = 'Enter a query in quotes, followed by a repository scope.\n\nExample: search "current state" tools/hud';
+        $('#outputResults').replaceChildren();
+      }
+      return;
+    }
     output.classList.add('open');
     $('#outputTitle').textContent = liveState ? 'Typed local operation' : 'Static operation preview';
     $('#outputText').textContent = `SEARCH\nQUERY ${operation.query}\nSCOPE ${operation.scope}\n\n${liveState ? 'The local runtime will select and record the exact search primitive.' : 'Snapshot mode cannot execute. The equivalent CLI command will be copied.'}`;
+    $('#outputResults').replaceChildren();
   }
 
   function filteredCommands() {
@@ -426,6 +438,48 @@
     output.classList.add('open');
     $('#outputTitle').textContent = 'Exact command';
     $('#outputText').textContent = `$ ${command}\n\n${copied ? 'Copied to the clipboard.' : 'Ready to copy.'}\nThis static browser client does not execute host shell commands.`;
+    $('#outputResults').replaceChildren();
+  }
+
+  async function copyHandoff() {
+    if (!liveState) return stageCommand('node tools/hud/cli.mjs handoff --copy');
+    output.classList.add('open');
+    $('#outputTitle').textContent = 'Compact operation handoff';
+    $('#outputText').textContent = 'Loading the last structured operation…';
+    $('#outputResults').replaceChildren();
+    try {
+      const response = await fetch('/handoff', { cache: 'no-store' });
+      const value = await response.json();
+      if (!response.ok) throw new Error(value.error || `Handoff request failed with HTTP ${response.status}.`);
+      let copied = false;
+      try { await navigator.clipboard.writeText(value.handoff); copied = true; } catch {}
+      $('#outputText').textContent = `${value.handoff}\n\n${copied ? 'Copied to the clipboard.' : 'Ready to copy.'}`;
+    } catch (error) {
+      $('#outputText').textContent = error.message;
+    }
+  }
+
+  function renderSearchResults(value) {
+    $('#outputText').textContent = `${value.command}\n\n${value.matchCount} matches in ${value.fileCount} files\n\nRaw evidence: run:${state.last?.runId || 'unknown'}`;
+    const results = $('#outputResults');
+    results.replaceChildren();
+    value.files.forEach((file) => {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'output-result';
+      const path = document.createElement('span');
+      path.textContent = file.path;
+      const count = document.createElement('strong');
+      count.textContent = String(file.count);
+      const lines = document.createElement('small');
+      lines.textContent = `lines ${file.lines.join(',')}`;
+      button.append(path, count, lines);
+      button.onclick = () => {
+        output.classList.remove('open');
+        openFile(file.path, true);
+      };
+      results.appendChild(button);
+    });
   }
 
   async function executeSearch(operation) {
@@ -474,7 +528,7 @@
     $('#searchState').className = search.matchCount ? 'search-text' : 'good';
     output.classList.add('open');
     $('#outputTitle').textContent = `Search: ${search.query}`;
-    $('#outputText').textContent = `${search.command}\n\n${search.matchCount} matches in ${search.fileCount} files\n${search.files.map((file) => `${file.path}  ${file.count}  lines ${file.lines.join(',')}`).join('\n')}\n\nRaw evidence: run:${state.last?.runId || 'unknown'}`;
+    renderSearchResults(search);
   }
 
   treeList.addEventListener('click', (event) => {
@@ -562,9 +616,16 @@
   $('#pickerList').onclick = (event) => {
     const button = event.target.closest('[data-command]');
     if (!button) return;
-    input.value = resolved(filteredCommands()[Number(button.dataset.command)][2]);
+    const chosen = filteredCommands()[Number(button.dataset.command)];
+    if (chosen[0] === 'Copy last handoff') {
+      togglePicker(false);
+      copyHandoff();
+      return;
+    }
+    input.value = resolved(chosen[2]);
     togglePicker(false);
     previewInput();
+    if (input.value.includes('""')) input.setSelectionRange(8, 8);
   };
   input.addEventListener('input', previewInput);
   $('#terminal').onsubmit = async (event) => {
