@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, discoverCommands, discoverShells, fetchUpdate, formatPacket, gitSnapshot, operationDetail, operationHistory, parseSearchOutput, readProjectState, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
+import { buildOperationContext, buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, discoverCommands, discoverShells, fetchUpdate, formatPacket, gitSnapshot, operationDetail, operationHistory, parseSearchOutput, readProjectState, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -629,6 +629,30 @@ test('terminal working directory cannot persist outside the verified repository'
   const record = await runTerminalCommand(project, command, { shell: shell.id });
   assert.equal(record.operation.cwdPersistence, 'outside-repository');
   assert.equal(record.operation.cwdAfter, project.root);
+});
+
+test('terminal context export is truthful, bounded, and benchmarked against raw evidence', async () => {
+  const project = await fixtureProject();
+  const shells = await discoverShells(project.root);
+  const shell = shells.find((entry) => entry.available && entry.id === (process.platform === 'win32' ? 'powershell' : 'bash'));
+  const command = shell.id === 'powershell'
+    ? "1..120 | ForEach-Object { Write-Output (('line {0} ' -f $_) + ('x' * 100)) }; [Console]::Error.WriteLine('TERMINAL_ERROR_EVIDENCE')"
+    : "for i in $(seq 1 120); do printf 'line %s %100s\\n' \"$i\" x; done; printf 'TERMINAL_ERROR_EVIDENCE\\n' >&2";
+  const record = await runTerminalCommand(project, command, { shell: shell.id });
+  const context = buildOperationContext(project, record);
+  assert.match(context.handoff, /OPERATION TERMINAL-COMMAND/);
+  assert.match(context.handoff, new RegExp(`COMMAND ${command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
+  assert.match(context.handoff, /STDOUT_EXCERPT \(tail, bounded\)/);
+  assert.match(context.handoff, /line 120/);
+  assert.doesNotMatch(context.handoff, /line 1 x/);
+  assert.match(context.handoff, /STDERR_EXCERPT\nTERMINAL_ERROR_EVIDENCE/);
+  assert.match(context.handoff, new RegExp(`RAW run:${record.id}`));
+  assert.ok(context.metrics.rawBytes > context.metrics.contextBytes);
+  assert.ok(context.metrics.reductionPercent > 0);
+  assert.equal(context.metrics.savedBytes, context.metrics.rawBytes - context.metrics.contextBytes);
+  const detail = await operationDetail(project, record.id);
+  assert.deepEqual(detail.contextMetrics, context.metrics);
+  assert.equal(detail.handoff, context.handoff);
 });
 
 test('evidence currency is current, stale, or unknown', () => {

@@ -926,13 +926,30 @@ export async function undoOperation(project, runId, { stream = false } = {}) {
   });
 }
 
-export function buildOperationHandoff(project, record) {
+function compactContextEvidence(value, { maxLines = 40, maxChars = 6000 } = {}) {
+  const cleaned = normalizeTerminalText(value || '').trim();
+  if (!cleaned) return { text: '', omitted: false };
+  let lines = cleaned.split('\n');
+  let omitted = lines.length > maxLines;
+  if (omitted) lines = lines.slice(-maxLines);
+  let text = lines.join('\n');
+  if (text.length > maxChars) { text = text.slice(-maxChars); omitted = true; }
+  return { text, omitted };
+}
+
+function evidenceSize(path) {
+  try { return path && existsSync(path) ? statSync(path).size : 0; } catch { return 0; }
+}
+
+export function buildOperationContext(project, record) {
   if (!record?.operation) throw new Error('The last run has no structured operation to hand off.');
   const operation = record.operation;
+  const operationCwd = operation.cwdAfter || operation.cwdBefore || record.cwd || project.root;
+  const cwdInside = relative(project.root, operationCwd).replaceAll('\\', '/');
   const lines = [
     `REPO ${basename(project.root)}`,
     `BRANCH ${record.gitAfter?.branch || record.branch}`,
-    `CWD ${operation.scope || '.'}`,
+    `CWD ${operation.scope || (!cwdInside || cwdInside.startsWith('..') ? '.' : cwdInside)}`,
     '',
     `OPERATION ${operation.type.toUpperCase()}`,
   ];
@@ -949,14 +966,44 @@ export function buildOperationHandoff(project, record) {
       ? `RESULT INTERRUPTED completion-not-observed duration=${operation.durationMs}ms`
       : `RESULT ${operation.status.toUpperCase()} exit=${operation.exitCode} duration=${operation.durationMs}ms`);
     if (operation.status !== 'interrupted' && operation.summary.length) lines.push(`SUMMARY ${operation.summary.join('; ')}`);
+  } else if (operation.type === 'terminal-command') {
+    lines.push(`SHELL ${operation.shellLabel || operation.shell}`);
+    lines.push(`COMMAND ${operation.displayCommand || operation.command}`);
+    lines.push(operation.status === 'interrupted'
+      ? `RESULT INTERRUPTED completion-not-observed duration=${operation.durationMs}ms`
+      : `RESULT ${operation.status.toUpperCase()} exit=${operation.exitCode} duration=${operation.durationMs}ms`);
+    if (operation.status !== 'interrupted' && operation.summary?.length) lines.push(`SUMMARY ${operation.summary.join('; ')}`);
+    if (operation.cwdPersistence === 'outside-repository') lines.push('CWD_RESULT NOT_ADOPTED outside-repository');
+    if (record.delta?.paths?.length) lines.push('', 'CHANGED_FILES', ...record.delta.paths);
+    const stdout = compactContextEvidence(record.stdoutPath && existsSync(record.stdoutPath) ? readFileSync(record.stdoutPath, 'utf8') : '', { maxLines: operation.summary?.length ? 12 : 40, maxChars: 6000 });
+    const stderr = compactContextEvidence(record.stderrPath && existsSync(record.stderrPath) ? readFileSync(record.stderrPath, 'utf8') : '');
+    if (stdout.text) lines.push('', `STDOUT_EXCERPT${stdout.omitted ? ' (tail, bounded)' : ''}`, stdout.text);
+    if (stderr.text) lines.push('', `STDERR_EXCERPT${stderr.omitted ? ' (tail, bounded)' : ''}`, stderr.text);
   } else if (operation.type === 'undo') {
     lines.push(`TARGET run:${operation.targetRunId}`);
     lines.push(`COMMAND ${operation.command}`);
     lines.push(`RESULT ${operation.status.toUpperCase()} ${operation.fileCount} files duration=${operation.durationMs}ms`);
     lines.push('', 'FILES', ...operation.paths);
+  } else {
+    lines.push(`COMMAND ${operation.command || record.command}`);
+    lines.push(`RESULT ${record.status.toUpperCase()} exit=${record.exitCode} duration=${record.durationMs}ms`);
   }
   lines.push('', `RAW run:${record.id}`, `STDOUT ${record.stdoutPath}`, `STDERR ${record.stderrPath}`);
-  return lines.join('\n');
+  const handoff = lines.join('\n');
+  const rawBytes = evidenceSize(record.stdoutPath) + evidenceSize(record.stderrPath);
+  const contextBytes = Buffer.byteLength(handoff);
+  return {
+    handoff,
+    metrics: {
+      rawBytes, contextBytes,
+      savedBytes: Math.max(0, rawBytes - contextBytes),
+      reductionPercent: rawBytes > 0 ? Math.max(0, Math.round((1 - contextBytes / rawBytes) * 1000) / 10) : 0,
+    },
+  };
+}
+
+export function buildOperationHandoff(project, record) {
+  return buildOperationContext(project, record).handoff;
 }
 
 export function workflowView(project, workflowId, limit = 100) {
@@ -1174,6 +1221,7 @@ export async function operationDetail(project, id) {
   const record = runById(project, id);
   if (!record?.operation) return null;
   const currency = await repositoryCurrency(project.root);
+  const context = buildOperationContext(project, record);
   return {
     runId: record.id,
     operation: record.operation,
@@ -1185,7 +1233,8 @@ export async function operationDetail(project, id) {
     gitBefore: record.gitBefore,
     gitAfter: record.gitAfter,
     raw: { stdout: record.stdoutPath, stderr: record.stderrPath },
-    handoff: buildOperationHandoff(project, record),
+    handoff: context.handoff,
+    contextMetrics: context.metrics,
   };
 }
 

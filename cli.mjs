@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildOperationHandoff, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildOperationContext, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 function parse(argv) {
   const args = [...argv];
@@ -232,7 +232,9 @@ async function main() {
   if (command === 'handoff') {
     const record = lastRun(project);
     if (!record) throw new Error('No recorded run exists for this project.');
-    const handoff = buildOperationHandoff(project, record);
+    const context = buildOperationContext(project, record);
+    if (options.json) return console.log(JSON.stringify({ runId: record.id, ...context }, null, 2));
+    const handoff = context.handoff;
     console.log(handoff);
     if (options.copy) copy(handoff);
     return;

@@ -2,7 +2,7 @@ import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSy
 import { createServer } from 'node:http';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildOperationHandoff, classifyEvidence, currentState, discoverShells, lastRun, operationDetail, operationHistory, recoverInterruptedRuns, repositoryCurrency, repositoryTree, runById, runRepositoryCommand, runTerminalCommand, searchRepository, undoOperation, undoPlan } from './core.mjs';
+import { buildOperationContext, classifyEvidence, currentState, discoverShells, lastRun, operationDetail, operationHistory, recoverInterruptedRuns, repositoryCurrency, repositoryTree, runById, runRepositoryCommand, runTerminalCommand, searchRepository, undoOperation, undoPlan } from './core.mjs';
 
 const staticRoot = join(dirname(fileURLToPath(import.meta.url)), 'visual-prototype');
 const contentTypes = {
@@ -422,7 +422,7 @@ export function createHudServer(project, { terminal = false } = {}) {
       if (historyMatch) {
         const detail = await operationDetail(project, historyMatch[1]);
         if (!detail) throw Object.assign(new Error('Structured operation run was not found.'), { statusCode: 404 });
-        json(response, 200, historyMatch[2] ? { runId: detail.runId, handoff: detail.handoff } : detail);
+        json(response, 200, historyMatch[2] ? { runId: detail.runId, handoff: detail.handoff, metrics: detail.contextMetrics } : detail);
         return;
       }
       const evidenceMatch = url.pathname.match(/^\/history\/(\d{14}-[0-9a-f]{4})\/evidence\/(stdout|stderr)$/i);
@@ -433,7 +433,8 @@ export function createHudServer(project, { terminal = false } = {}) {
       if (url.pathname === '/handoff') {
         const record = lastRun(project);
         if (!record?.operation) throw Object.assign(new Error('No structured operation is available to hand off.'), { statusCode: 404 });
-        json(response, 200, { runId: record.id, handoff: buildOperationHandoff(project, record) });
+        const context = buildOperationContext(project, record);
+        json(response, 200, { runId: record.id, handoff: context.handoff, metrics: context.metrics });
         return;
       }
       if (url.pathname === '/source') {

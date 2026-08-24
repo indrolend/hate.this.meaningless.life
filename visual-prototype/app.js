@@ -627,7 +627,10 @@
       if (!response.ok) throw new Error(value.error || `Handoff request failed with HTTP ${response.status}.`);
       let copied = false;
       try { await navigator.clipboard.writeText(value.handoff); copied = true; } catch {}
-      $('#outputText').textContent = `${value.handoff}\n\n${copied ? 'Copied to the clipboard.' : 'Ready to copy.'}`;
+      const metrics = value.metrics
+        ? `Context benchmark: ${formatSize(value.metrics.rawBytes)} raw → ${formatSize(value.metrics.contextBytes)} context · ${value.metrics.reductionPercent}% smaller`
+        : '';
+      $('#outputText').textContent = `${value.handoff}\n\n${metrics}${metrics ? '\n' : ''}${copied ? 'Copied to the clipboard.' : 'Ready to copy.'}`;
     } catch (error) {
       $('#outputText').textContent = error.message;
     }
@@ -659,7 +662,10 @@
   async function copyRecordedHandoff(detail) {
     let copied = false;
     try { await navigator.clipboard.writeText(detail.handoff); copied = true; } catch {}
-    $('#outputText').textContent += copied ? '\n\nHandoff copied.' : '\n\nHandoff is ready but clipboard access was unavailable.';
+    const metrics = detail.contextMetrics
+      ? `\nContext benchmark: ${formatSize(detail.contextMetrics.rawBytes)} raw → ${formatSize(detail.contextMetrics.contextBytes)} context · ${detail.contextMetrics.reductionPercent}% smaller`
+      : '';
+    $('#outputText').textContent += `${metrics}${copied ? '\n\nHandoff copied.' : '\n\nHandoff is ready but clipboard access was unavailable.'}`;
   }
 
   function appendEvidenceActions(actions, runId) {

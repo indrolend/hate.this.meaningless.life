@@ -187,6 +187,8 @@ test('HUD server serializes typed operations and exposes bounded evidence, live 
   assert.equal(handoff.runId, state.last.runId);
   assert.match(handoff.handoff, new RegExp(`RAW run:${state.last.runId}`));
   assert.match(handoff.handoff, /media\/tone\.wav 1 lines=1/);
+  assert.equal(typeof handoff.metrics.rawBytes, 'number');
+  assert.equal(typeof handoff.metrics.contextBytes, 'number');
 
   const sourceResponse = await fetch(`${base}/source?path=${encodeURIComponent('media/tone.wav')}&context=0`);
   assert.equal(sourceResponse.status, 200);
@@ -328,7 +330,9 @@ test('HUD server serializes typed operations and exposes bounded evidence, live 
   const detail = await detailResponse.json();
   assert.deepEqual(detail.operation, search.operation);
   assert.match(detail.handoff, new RegExp(`RAW run:${search.runId}`));
-  assert.equal((await fetch(`${base}/history/${search.runId}/handoff`)).status, 200);
+  const historicalHandoff = await fetch(`${base}/history/${search.runId}/handoff`);
+  assert.equal(historicalHandoff.status, 200);
+  assert.equal(typeof (await historicalHandoff.json()).metrics.contextBytes, 'number');
   const stdoutEvidenceResponse = await fetch(`${base}/history/${commandRunId}/evidence/stdout?tail=3`);
   assert.equal(stdoutEvidenceResponse.status, 200);
   const stdoutEvidence = await stdoutEvidenceResponse.json();

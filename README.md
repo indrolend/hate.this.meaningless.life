@@ -150,6 +150,10 @@ The trusted desktop launcher enables one additional local-only capability: ordin
 
 Each command records stdout, stderr, exit status, duration, Git state, and content delta through the same immutable run path used by repository commands. The command's final working directory becomes the next command's starting directory only when it resolves to an existing directory inside the verified repository. An attempted directory escape is recorded as `outside-repository` and is not adopted. Commands can be cancelled through the existing active-run identity, and partial content changes remain eligible for evidence-backed Undo.
 
+After any desktop terminal command, **Copy handoff** produces a bounded context packet intended for the ordinary chat-to-terminal loop. It includes repository/branch/cwd, explicit shell, exact user command, truthful status and exit code, changed paths, up to 40 cleaned tail lines from stdout and stderr, and the immutable raw run reference. Full evidence is never replaced or rewritten. Large excerpts are visibly marked `tail, bounded`.
+
+The handoff API and `hud handoff --json` report observed `rawBytes`, `contextBytes`, `savedBytes`, and `reductionPercent`. The desktop displays the same raw-to-context comparison after copying. These are byte-density measurements for that recorded operation, not estimates of developer productivity or token cost. Small outputs can legitimately have zero reduction because provenance fields cost more than the raw text.
+
 The terminal endpoint accepts only `{ command, shell }`, only while the server was created by the desktop host. The browser cannot supply a working directory, executable transport, evidence path, or process identity. This is a desktop authorization boundary rather than a claim that arbitrary project commands are safe.
 
 ## Live local session
