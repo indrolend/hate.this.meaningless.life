@@ -114,7 +114,7 @@ Inspect the projection without dumping every path:
 node tools/hud/cli.mjs tree
 ```
 
-Start the read-only live adapter and open the local page:
+Start the local adapter and open the local page:
 
 ```powershell
 node tools/hud/cli.mjs serve
@@ -122,7 +122,7 @@ node tools/hud/cli.mjs serve
 
 Open `http://127.0.0.1:8765/`. The tree and map consume one projection. The map progressively displays the repository root, a selected directory, and that directory's immediate children. File focus displays only mechanically derived type, size, path, and Git state.
 
-The adapter binds to loopback by default and exposes only read operations: `/state`, `/tree`, `/visual-state`, static prototype assets, and projected repository media. It has no shell-execution endpoint. Use `hud serve --lan` only when explicitly testing from another device on the local network.
+The adapter binds to loopback by default. It exposes read operations for state, tree, static assets, and projected media, plus one typed mutation boundary: `POST /operations/search` accepts only same-origin JSON containing `query` and repository-relative `scope`, then delegates to `searchRepository()`. It has no arbitrary shell-execution endpoint. Use `hud serve --lan` only when explicitly testing from another device on the local network.
 
 File focus uses native browser controls to preview projected MP4, MOV, WebM, MP3, WAV, M4A, AAC, OGG, and FLAC files. Image formats are displayed directly. Media delivery supports byte ranges for seeking. Actual playback still depends on the codecs supported by the active browser; a `.mov` container is not proof that its internal codec can be decoded.
 
@@ -137,6 +137,8 @@ node tools/hud/cli.mjs handoff --copy
 ```
 
 `rg` exit code 1 is represented truthfully as a successful zero-match search. Missing tools are blocked and other search-tool failures remain failed. The compact handoff lists the repository, branch, scope, exact command, factual file/line counts, and the immutable run ID and raw evidence paths. The live map reads `lastOperation` from `currentState()` and highlights those same paths; it does not infer dependencies or file meaning.
+
+In the live renderer, choose Search from the toolkit and submit an explicit `search "query" scope` operation. The browser sends structured JSON rather than a command string; the runtime validates it, runs `rg` directly without a shell, records the evidence, and returns refreshed semantic state. Snapshot mode continues to copy the equivalent CLI command without claiming execution.
 
 `hud visual-state` remains a compatibility path for static hosting. It writes ignored `hud-state.js`, which contains machine-specific paths and transient Git state. Static mode can navigate that snapshot but cannot stream repository media. The browser command bar stages and copies exact commands; actual command execution remains owned by the CLI and Windows bridge.
 

@@ -2,7 +2,7 @@ import { createReadStream, existsSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { currentState, repositoryTree } from './core.mjs';
+import { currentState, repositoryTree, searchRepository } from './core.mjs';
 
 const staticRoot = join(dirname(fileURLToPath(import.meta.url)), 'visual-prototype');
 const contentTypes = {
@@ -23,6 +23,43 @@ function json(response, status, value) {
     'Cache-Control': 'no-store',
   });
   response.end(body);
+}
+
+async function jsonBody(request, limit = 16 * 1024) {
+  const declared = Number(request.headers['content-length'] || 0);
+  if (declared > limit) throw Object.assign(new Error('Operation request is too large.'), { statusCode: 413 });
+  const chunks = [];
+  let size = 0;
+  for await (const chunk of request) {
+    size += chunk.length;
+    if (size > limit) throw Object.assign(new Error('Operation request is too large.'), { statusCode: 413 });
+    chunks.push(chunk);
+  }
+  try { return JSON.parse(Buffer.concat(chunks).toString('utf8')); }
+  catch { throw Object.assign(new Error('Operation request must be valid JSON.'), { statusCode: 400 }); }
+}
+
+function searchRequest(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('Search request must be an object.'), { statusCode: 400 });
+  const unknown = Object.keys(value).filter((key) => !['query', 'scope'].includes(key));
+  if (unknown.length) throw Object.assign(new Error(`Unsupported search fields: ${unknown.join(', ')}`), { statusCode: 400 });
+  if (typeof value.query !== 'string' || !value.query.trim() || value.query.length > 500) throw Object.assign(new Error('Search query must be 1-500 characters.'), { statusCode: 400 });
+  if (value.scope !== undefined && (typeof value.scope !== 'string' || !value.scope || value.scope.length > 500)) throw Object.assign(new Error('Search scope must be a repository-relative string.'), { statusCode: 400 });
+  return { query: value.query, scope: value.scope || '.' };
+}
+
+function validateOperationRequest(request) {
+  if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) {
+    throw Object.assign(new Error('Operation requests require application/json.'), { statusCode: 415 });
+  }
+  const origin = request.headers.origin;
+  if (origin) {
+    let originHost = null;
+    try { originHost = new URL(origin).host; } catch {}
+    if (!originHost || originHost !== request.headers.host) {
+      throw Object.assign(new Error('Cross-origin operation requests are not allowed.'), { statusCode: 403 });
+    }
+  }
 }
 
 function projectedPaths(directory, result = new Set()) {
@@ -74,8 +111,26 @@ export function createHudServer(project) {
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
+      if (request.method === 'POST' && url.pathname === '/operations/search') {
+        validateOperationRequest(request);
+        const operation = searchRequest(await jsonBody(request));
+        let record;
+        try { record = await searchRepository(project, operation.query, operation.scope); }
+        catch (error) {
+          if (/Search scope (?:is outside|does not exist)/.test(error.message)) error.statusCode = 400;
+          throw error;
+        }
+        json(response, 200, {
+          runId: record.id,
+          status: record.status,
+          operation: record.operation,
+          evidence: { stdout: record.stdoutPath, stderr: record.stderrPath },
+          state: await currentState(project),
+        });
+        return;
+      }
       if (!['GET', 'HEAD'].includes(request.method)) {
-        json(response, 405, { error: 'CommandHUD serve is read-only.' });
+        json(response, 405, { error: 'Only the typed Search operation accepts local mutation requests.' });
         return;
       }
       if (url.pathname === '/state' || url.pathname === '/visual-state') {
@@ -110,7 +165,7 @@ export function createHudServer(project) {
       }
       sendFile(request, response, target);
     } catch (error) {
-      json(response, 500, { error: error.message });
+      json(response, error.statusCode || 500, { error: error.message });
     }
   });
 }

@@ -454,7 +454,7 @@ export function formatPacket(packet) {
 
 export async function runCommand(project, tokens, {
   objective, stream = true, request = null, workflow = null,
-  acceptedExitCodes = [0], operationReducer = null,
+  acceptedExitCodes = [0], operationReducer = null, shell = true,
 } = {}) {
   if (!tokens.length) throw new Error('hud run requires a command.');
   const command = tokens.map((token) => /[\s"']/.test(token) ? JSON.stringify(token) : token).join(' ');
@@ -472,15 +472,21 @@ export async function runCommand(project, tokens, {
   const started = new Date();
   let child;
   try {
-    child = spawn(command, { cwd: project.root, shell: true, windowsHide: true, env: process.env });
+    child = shell
+      ? spawn(command, { cwd: project.root, shell: true, windowsHide: true, env: process.env })
+      : spawn(tokens[0], tokens.slice(1), { cwd: project.root, shell: false, windowsHide: true, env: process.env });
   } catch (error) {
     stdoutFile.end(); stderrFile.end();
     throw new Error(`Unable to spawn command: ${error.message}`);
   }
   child.stdout.on('data', (chunk) => { const value = chunk.toString(); stdout += value; stdoutFile.write(value); if (stream) process.stdout.write(value); });
   child.stderr.on('data', (chunk) => { const value = chunk.toString(); stderr += value; stderrFile.write(value); if (stream) process.stderr.write(value); });
-  const exitCode = await new Promise((resolveCode, reject) => {
-    child.once('error', reject);
+  const exitCode = await new Promise((resolveCode) => {
+    child.once('error', (error) => {
+      const value = `${error.code || 'SPAWN'}: ${error.message}\n`;
+      stderr += value;
+      stderrFile.write(value);
+    });
     child.once('close', (code) => resolveCode(code ?? 1));
   });
   await Promise.all([new Promise((r) => stdoutFile.end(r)), new Promise((r) => stderrFile.end(r))]);
@@ -555,6 +561,7 @@ export async function searchRepository(project, query, scope = '.', { stream = f
     request: `search ${query} in ${selectedScope}`,
     objective: `Find ${query} in ${selectedScope}`,
     stream,
+    shell: false,
     acceptedExitCodes: [0, 1],
     operationReducer: ({ stdout, exitCode, command }) => {
       const result = exitCode <= 1 ? parseSearchOutput(stdout) : { matches: 0, files: [] };

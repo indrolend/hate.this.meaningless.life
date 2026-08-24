@@ -136,7 +136,7 @@ async function main() {
     const running = await startHudServer(project, { host: options.host, port: options.port });
     console.log(`HUD_URL=http://${running.host}:${running.port}/`);
     console.log(`ROOT=${project.root}`);
-    console.log('MODE=READ_ONLY');
+    console.log('MODE=TYPED_OPERATIONS');
     return;
   }
   if (command === 'search') {

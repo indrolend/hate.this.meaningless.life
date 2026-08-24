@@ -42,8 +42,8 @@
       ['Refresh visual snapshot', 'Regenerate the ignored browser-state bridge.', 'node tools/hud/cli.mjs visual-state', 'HUD'],
     ],
     Search: [
-      ['Search repository', 'Run a literal ripgrep search and preserve its evidence.', 'node tools/hud/cli.mjs search "query" .', 'repository'],
-      ['Search HUD', 'Limit a real search to CommandHUD sources.', 'node tools/hud/cli.mjs search "query" tools/hud', 'tools/hud'],
+      ['Search repository', 'Run a recorded literal search across the repository.', 'search "query" .', 'repository'],
+      ['Search current directory', 'Run a recorded literal search in the visible map scope.', 'search "query" {current}', 'current directory'],
       ['Copy last handoff', 'Copy the compact context for the last structured operation.', 'node tools/hud/cli.mjs handoff --copy', 'HUD'],
     ],
     Git: [
@@ -302,7 +302,24 @@
   }
 
   function resolved(command) {
-    return command.replaceAll('{selection}', selected?.path || '[select a file]');
+    return command
+      .replaceAll('{selection}', selected?.path || '[select a file]')
+      .replaceAll('{current}', currentDirectory || '.');
+  }
+
+  function typedSearch(value) {
+    const match = String(value || '').match(/^search\s+(?:"([^"]*)"|'([^']*)'|(\S+))(?:\s+(\S+))?\s*$/i);
+    if (!match) return null;
+    return { query: match[1] ?? match[2] ?? match[3], scope: match[4] || '.' };
+  }
+
+  function previewInput() {
+    const operation = typedSearch(input.value);
+    $('.run').textContent = liveState && operation ? 'Search' : 'Copy';
+    if (!operation) return;
+    output.classList.add('open');
+    $('#outputTitle').textContent = liveState ? 'Typed local operation' : 'Static operation preview';
+    $('#outputText').textContent = `SEARCH\nQUERY ${operation.query}\nSCOPE ${operation.scope}\n\n${liveState ? 'The local runtime will select and record the exact search primitive.' : 'Snapshot mode cannot execute. The equivalent CLI command will be copied.'}`;
   }
 
   function filteredCommands() {
@@ -335,6 +352,29 @@
     output.classList.add('open');
     $('#outputTitle').textContent = 'Exact command';
     $('#outputText').textContent = `$ ${command}\n\n${copied ? 'Copied to the clipboard.' : 'Ready to copy.'}\nThis static browser client does not execute host shell commands.`;
+  }
+
+  async function executeSearch(operation) {
+    output.classList.add('open');
+    $('#outputTitle').textContent = 'Search running';
+    $('#outputText').textContent = `SEARCH\nQUERY ${operation.query}\nSCOPE ${operation.scope}\n\nWaiting for the local runtime…`;
+    $('.run').disabled = true;
+    try {
+      const response = await fetch('/operations/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(operation),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || `Search request failed with HTTP ${response.status}.`);
+      $('#outputTitle').textContent = `Search ${result.status}`;
+      $('#outputText').textContent = `${result.operation.command}\n\n${result.operation.matchCount} matches in ${result.operation.fileCount} files\nRaw evidence: run:${result.runId}\n\nRefreshing repository state…`;
+      window.setTimeout(() => window.location.reload(), 250);
+    } catch (error) {
+      $('#outputTitle').textContent = 'Search rejected';
+      $('#outputText').textContent = error.message;
+      $('.run').disabled = false;
+    }
   }
 
   if (!repository?.root) {
@@ -450,11 +490,16 @@
     if (!button) return;
     input.value = resolved(filteredCommands()[Number(button.dataset.command)][2]);
     togglePicker(false);
+    previewInput();
   };
-  $('#terminal').onsubmit = (event) => {
+  input.addEventListener('input', previewInput);
+  $('#terminal').onsubmit = async (event) => {
     event.preventDefault();
     togglePicker(false);
-    stageCommand(input.value);
+    const operation = typedSearch(input.value);
+    if (liveState && operation) await executeSearch(operation);
+    else if (!liveState && operation) await stageCommand(`node tools/hud/cli.mjs search ${JSON.stringify(operation.query)} ${operation.scope}`);
+    else await stageCommand(input.value);
   };
   $('#outputClose').onclick = () => output.classList.remove('open');
   window.addEventListener('keydown', (event) => {

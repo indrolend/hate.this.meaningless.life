@@ -415,6 +415,11 @@ test('search records real scoped matches, truthful zero results, raw evidence, a
   assert.equal(failed.operation.matchCount, 0);
   assert.notEqual(failed.exitCode, 0);
   assert.notEqual(readFileSync(failed.stderrPath, 'utf8'), '');
+
+  const unavailable = await searchRepository(project, 'needle', 'src', { tool: 'commandhud-missing-search-tool' });
+  assert.equal(unavailable.status, 'blocked');
+  assert.equal(unavailable.operation.toolAvailable, false);
+  assert.match(readFileSync(unavailable.stderrPath, 'utf8'), /ENOENT|not found/i);
 });
 
 test('evidence currency is current, stale, or unknown', () => {

@@ -31,7 +31,7 @@ function fixtureProject() {
   });
 }
 
-test('read-only HUD server exposes live state, tree, static UI, and byte-range media', async (t) => {
+test('HUD server exposes live reads, typed Search, and byte-range media without arbitrary execution', async (t) => {
   const project = await fixtureProject();
   await searchRepository(project, 'RIFF', 'media');
   const running = await startHudServer(project, { port: 0 });
@@ -76,4 +76,47 @@ test('read-only HUD server exposes live state, tree, static UI, and byte-range m
 
   assert.equal((await fetch(`${base}/media?path=../secret.txt`)).status, 404);
   assert.equal((await fetch(`${base}/state`, { method: 'POST' })).status, 405);
+
+  const searchResponse = await fetch(`${base}/operations/search`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: 'RIFF', scope: 'media' }),
+  });
+  assert.equal(searchResponse.status, 200);
+  const search = await searchResponse.json();
+  assert.equal(search.status, 'pass');
+  assert.equal(search.operation.command, 'rg -n --no-heading --color never --fixed-strings -- RIFF media');
+  assert.deepEqual(search.operation.files, [{ path: 'media/tone.wav', count: 1, lines: [1] }]);
+  assert.equal(search.state.last.runId, search.runId);
+  assert.deepEqual(search.state.lastOperation, search.operation);
+
+  const zeroResponse = await fetch(`${base}/operations/search`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: 'not-present', scope: 'media' }),
+  });
+  const zero = await zeroResponse.json();
+  assert.equal(zeroResponse.status, 200);
+  assert.equal(zero.operation.exitCode, 1);
+  assert.equal(zero.operation.matchCount, 0);
+
+  const runBeforeInvalid = (await (await fetch(`${base}/state`)).json()).last.runId;
+  for (const body of [
+    { query: '', scope: 'media' },
+    { query: 'RIFF', scope: '../outside' },
+    { query: 'RIFF', scope: 'media', executable: 'powershell' },
+  ]) {
+    const invalid = await fetch(`${base}/operations/search`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+    });
+    assert.equal(invalid.status, 400);
+  }
+  const wrongType = await fetch(`${base}/operations/search`, {
+    method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: JSON.stringify({ query: 'RIFF', scope: 'media' }),
+  });
+  assert.equal(wrongType.status, 415);
+  const crossOrigin = await fetch(`${base}/operations/search`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json', Origin: 'https://example.invalid' },
+    body: JSON.stringify({ query: 'RIFF', scope: 'media' }),
+  });
+  assert.equal(crossOrigin.status, 403);
+  assert.equal((await (await fetch(`${base}/state`)).json()).last.runId, runBeforeInvalid);
 });
