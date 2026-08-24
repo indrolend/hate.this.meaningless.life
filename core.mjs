@@ -476,6 +476,7 @@ export function formatPacket(packet) {
 export async function runCommand(project, tokens, {
   objective, stream = true, request = null, workflow = null,
   acceptedExitCodes = [0], operationReducer = null, shell = true, captureDelta = false,
+  signal = null, onStart = null, onOutput = null,
 } = {}) {
   if (!tokens.length) throw new Error('hud run requires a command.');
   const command = tokens.map((token) => /[\s"']/.test(token) ? JSON.stringify(token) : token).join(' ');
@@ -494,6 +495,8 @@ export async function runCommand(project, tokens, {
   let stderr = '';
   const started = new Date();
   let child;
+  let cancellationRequested = false;
+  let forceTimer = null;
   try {
     child = shell
       ? spawn(command, { cwd: project.root, shell: true, windowsHide: true, env: process.env })
@@ -502,8 +505,29 @@ export async function runCommand(project, tokens, {
     stdoutFile.end(); stderrFile.end();
     throw new Error(`Unable to spawn command: ${error.message}`);
   }
-  child.stdout.on('data', (chunk) => { const value = chunk.toString(); stdout += value; stdoutFile.write(value); if (stream) process.stdout.write(value); });
-  child.stderr.on('data', (chunk) => { const value = chunk.toString(); stderr += value; stderrFile.write(value); if (stream) process.stderr.write(value); });
+  const terminate = async (force = false) => {
+    if (!child?.pid || child.exitCode !== null) return;
+    try {
+      if (process.platform === 'win32') await exec('taskkill', ['/pid', String(child.pid), '/t', ...(force ? ['/f'] : [])], project.root);
+      else child.kill(force ? 'SIGKILL' : 'SIGTERM');
+    } catch {
+      // The process may exit between the liveness check and termination request.
+    }
+  };
+  const cancel = () => {
+    if (cancellationRequested) return;
+    cancellationRequested = true;
+    void terminate(false);
+    forceTimer = setTimeout(() => void terminate(true), 1500);
+    forceTimer.unref?.();
+  };
+  if (signal) {
+    if (signal.aborted) cancel();
+    else signal.addEventListener('abort', cancel, { once: true });
+  }
+  onStart?.({ runId: id, command, startedAt: started.toISOString(), stdoutPath, stderrPath, pid: child.pid });
+  child.stdout.on('data', (chunk) => { const value = chunk.toString(); stdout += value; stdoutFile.write(value); onOutput?.('stdout', value); if (stream) process.stdout.write(value); });
+  child.stderr.on('data', (chunk) => { const value = chunk.toString(); stderr += value; stderrFile.write(value); onOutput?.('stderr', value); if (stream) process.stderr.write(value); });
   const exitCode = await new Promise((resolveCode) => {
     child.once('error', (error) => {
       const value = `${error.code || 'SPAWN'}: ${error.message}\n`;
@@ -512,6 +536,8 @@ export async function runCommand(project, tokens, {
     });
     child.once('close', (code) => resolveCode(code ?? 1));
   });
+  if (forceTimer) clearTimeout(forceTimer);
+  signal?.removeEventListener?.('abort', cancel);
   await Promise.all([new Promise((r) => stdoutFile.end(r)), new Promise((r) => stderrFile.end(r))]);
   const ended = new Date();
   const [after, currencyAfter, treeAfter] = await Promise.all([
@@ -532,7 +558,7 @@ export async function runCommand(project, tokens, {
       count: Number.isInteger(workflow.count) ? workflow.count : null,
     } : null,
     startedAt: started.toISOString(), endedAt: ended.toISOString(), durationMs: ended - started,
-    exitCode, status: accepted ? 'pass' : missingCommand ? 'blocked' : 'fail',
+    exitCode, status: cancellationRequested ? 'cancelled' : accepted ? 'pass' : missingCommand ? 'blocked' : 'fail',
     dirtyBefore: before.dirty, dirtyAfter: after.dirty,
     changedFiles: after.changedFiles, gitBefore: before, gitAfter: after,
     currencyBefore, currencyAfter,
@@ -612,7 +638,7 @@ export async function searchRepository(project, query, scope = '.', { stream = f
   });
 }
 
-export async function runRepositoryCommand(project, name, { stream = false } = {}) {
+export async function runRepositoryCommand(project, name, { stream = false, signal = null, onStart = null, onOutput = null } = {}) {
   const selected = repositoryCommandDefinitions(project.root).find((command) => command.name === String(name || ''));
   if (!selected) throw new Error(`Unknown repository command: ${name}`);
   let argv = [...selected.argv];
@@ -628,6 +654,7 @@ export async function runRepositoryCommand(project, name, { stream = false } = {
     stream,
     shell: false,
     captureDelta: true,
+    signal, onStart, onOutput,
     operationReducer: ({ exitCode, command, record }) => ({
       type: 'repository-command', name: selected.name,
       displayCommand: selected.command, command, exitCode,

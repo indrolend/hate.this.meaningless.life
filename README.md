@@ -172,6 +172,16 @@ History can display raw stdout and stderr through `GET /history/:runId/evidence/
 
 The visual Library mechanically groups package scripts by their colon-separated namespace, including HUD, Android, Native, LG, and maintenance-related groups. Unnamespaced scripts and factual repository adapters remain in General and Tools. Typing in the picker searches across every group while an empty query retains the selected directory. These groups are derived from `currentState().commands`; they do not introduce a second command catalog.
 
+## Live command lifecycle and cancellation
+
+While a repository command is active, `GET /runtime` reports its runtime-owned run identity, exact resolved command, elapsed lifecycle, and whether it can be cancelled. The visual command result follows `starting`, `running`, and `cancelling` states, and reads a bounded tail of the active stdout evidence from `GET /runtime/evidence/stdout`. The renderer never supplies an evidence path or process ID.
+
+`POST /operations/cancel` accepts only the currently active run identity. It signals the existing command execution owned by the server; it cannot select or terminate an arbitrary process. On Windows, CommandHUD asks the spawned process tree to terminate and escalates to a forced tree termination after a short grace period. Other platforms use `SIGTERM` followed by `SIGKILL` after the same grace period.
+
+Cancellation still completes an immutable `CANCELLED` run record with the output produced before termination, Git before/after state, and the captured content delta. Output may therefore contain complete-looking lines emitted before the cancellation took effect; the authoritative operation status remains `CANCELLED`. Partial repository changes remain in the worktree rather than being silently discarded, and the existing evidence-backed Undo flow is offered when that captured delta is safe to reverse.
+
+Cancellation currently applies only to repository commands started by the running server. Search and Undo remain short serialized operations, and an interrupted server process does not yet reconstruct or recover an in-flight run automatically.
+
 In the live renderer, submitting Search sends structured `query` and `scope` JSON rather than a command string. The runtime validates it, runs `rg` directly without a shell, records the evidence, and returns refreshed semantic state. Snapshot mode keeps the same Search controls but only copies the equivalent CLI command without claiming execution.
 
 `hud visual-state` remains a compatibility path for static hosting. It writes ignored `hud-state.js`, which contains machine-specific paths and transient Git state. Static mode can navigate that snapshot but cannot stream repository media. The browser command bar stages and copies exact commands; actual command execution remains owned by the CLI and Windows bridge.

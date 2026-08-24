@@ -848,6 +848,51 @@
     actions.classList.add('open');
   }
 
+  async function cancelActiveRun(runId) {
+    $('#outputTitle').textContent = 'Cancelling repository command';
+    showRuntime({ busy: { type: 'repository-command', state: 'cancelling', runId } });
+    try {
+      const response = await fetch('/operations/cancel', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId }),
+      });
+      const value = await response.json();
+      if (!response.ok) throw new Error(value.error || `Cancel failed with HTTP ${response.status}.`);
+      const actions = $('#outputActions');
+      actions.replaceChildren(outputAction('Cancelling…', '', () => {}));
+      actions.firstChild.disabled = true;
+    } catch (error) {
+      $('#outputTitle').textContent = 'Cancel refused';
+      $('#outputText').textContent += `\n\n${error.message}`;
+      refreshRuntime();
+    }
+  }
+
+  async function monitorRepositoryCommand(control) {
+    while (!control.done) {
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      if (control.done) return;
+      try {
+        const response = await fetch('/runtime', { cache: 'no-store' });
+        if (!response.ok) continue;
+        const value = await response.json();
+        showRuntime(value);
+        const active = value.busy;
+        if (!active?.runId || active.type !== 'repository-command') continue;
+        const evidenceResponse = await fetch(`/runtime/evidence/stdout?run=${encodeURIComponent(active.runId)}&tail=80`, { cache: 'no-store' });
+        const evidence = evidenceResponse.ok ? await evidenceResponse.json() : null;
+        if (control.done) return;
+        const elapsed = Math.max(0, Date.now() - Date.parse(active.startedAt || new Date().toISOString()));
+        $('#outputTitle').textContent = active.state === 'cancelling' ? 'Repository command cancelling' : 'Repository command running';
+        $('#outputText').textContent = `${active.command || active.label}\n\n${(elapsed / 1000).toFixed(1)}s · ${active.state.toUpperCase()}\n\n${evidence?.text || 'Waiting for output…'}`;
+        const actions = $('#outputActions');
+        if (active.cancellable && active.state === 'running') {
+          actions.replaceChildren(outputAction('Cancel', 'confirm', () => cancelActiveRun(active.runId)));
+          actions.classList.add('open');
+        }
+      } catch {}
+    }
+  }
+
   async function executeRepositoryCommand(name) {
     const actions = $('#outputActions');
     actions.replaceChildren();
@@ -855,15 +900,20 @@
     $('#outputTitle').textContent = 'Repository command running';
     $('#outputText').textContent = `${name}\n\nWaiting for the local runtime…`;
     showRuntime({ busy: { type: 'repository-command' } });
+    const monitor = { done: false };
+    monitorRepositoryCommand(monitor);
     try {
       const response = await fetch('/operations/repository-command', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
       });
+      monitor.done = true;
       const result = await response.json();
       if (!response.ok) { if (result.busy) showRuntime({ busy: result.busy }); throw new Error(result.error || `Repository command failed with HTTP ${response.status}.`); }
       state = result.state;
-      const summary = result.operation.summary.length ? result.operation.summary.join('; ') : `exit ${result.operation.exitCode}`;
+      const summary = result.status === 'cancelled'
+        ? 'Cancelled by user'
+        : result.operation.summary.length ? result.operation.summary.join('; ') : `exit ${result.operation.exitCode}`;
       $('#outputTitle').textContent = `${result.operation.name} ${result.status}`;
       $('#outputText').textContent = `${result.operation.command}\n\n${summary}\n${(result.operation.durationMs / 1000).toFixed(1)}s\nRaw evidence: run:${result.runId}`;
       $('#snapshotState').textContent = state.git.head.slice(0, 7);
@@ -875,9 +925,21 @@
       document.querySelectorAll('.search-match').forEach((element) => element.classList.remove('search-match'));
       actions.replaceChildren(outputAction('Copy handoff', 'confirm', copyHandoff));
       appendEvidenceActions(actions, result.runId);
+      if (result.status === 'cancelled') {
+        const [detailResponse, planResponse] = await Promise.all([
+          fetch(`/history/${encodeURIComponent(result.runId)}`, { cache: 'no-store' }),
+          fetch(`/undo/${encodeURIComponent(result.runId)}`, { cache: 'no-store' }),
+        ]);
+        if (detailResponse.ok && planResponse.ok) {
+          const detail = await detailResponse.json();
+          const plan = await planResponse.json();
+          if (plan.state === 'SAFE') actions.appendChild(outputAction('Undo partial changes', 'confirm', () => confirmUndo(detail, plan)));
+        }
+      }
       actions.classList.add('open');
       showRuntime({ busy: null });
     } catch (error) {
+      monitor.done = true;
       $('#outputTitle').textContent = 'Repository command rejected';
       $('#outputText').textContent = error.message;
       refreshRuntime();

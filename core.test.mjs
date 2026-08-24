@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -90,6 +90,32 @@ test('repository command execution resolves a current discovered identity and re
 
   await assert.rejects(() => runRepositoryCommand(project, 'not-declared'), /Unknown repository command/);
   assert.equal(readProjectState(project).lastRunId, redo.id);
+});
+
+test('repository command cancellation preserves partial changes and reversible evidence', async () => {
+  const root = fixture();
+  mkdirSync(join(root, 'tools'));
+  writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync(new URL("../partial.txt", import.meta.url), "partial\\n"); await new Promise((resolve) => setTimeout(resolve, 5000));\n');
+  execFileSync('git', ['add', 'tools/run-native-tests.mjs'], { cwd: root });
+  execFileSync('git', ['commit', '-m', 'add cancellable fixture'], { cwd: root });
+  const project = await resolveProject({ cwd: root, env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'hud-cancel-state-')) } });
+  const controller = new AbortController();
+  let started = null;
+  const pending = runRepositoryCommand(project, 'native-tests', {
+    signal: controller.signal,
+    onStart: (value) => { started = value; setTimeout(() => controller.abort(), 150); },
+  });
+  const record = await pending;
+  assert.ok(started?.runId);
+  assert.equal(record.id, started.runId);
+  assert.equal(record.status, 'cancelled');
+  assert.equal(record.operation.status, 'cancelled');
+  assert.deepEqual(record.delta.paths, ['partial.txt']);
+  assert.equal(readFileSync(join(root, 'partial.txt'), 'utf8'), 'partial\n');
+  assert.equal((await undoPlan(project, record.id)).state, 'SAFE');
+  const undo = await undoOperation(project, record.id);
+  assert.equal(undo.status, 'pass');
+  assert.equal(existsSync(join(root, 'partial.txt')), false);
 });
 
 test('reducers retain concise evidence and cause classification', () => {

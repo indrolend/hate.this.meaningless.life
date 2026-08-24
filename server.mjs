@@ -64,6 +64,14 @@ function undoRequest(value) {
   return { runId: value.runId };
 }
 
+function cancelRequest(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('Cancel request must be an object.'), { statusCode: 400 });
+  const unknown = Object.keys(value).filter((key) => key !== 'runId');
+  if (unknown.length) throw Object.assign(new Error(`Unsupported Cancel fields: ${unknown.join(', ')}`), { statusCode: 400 });
+  if (typeof value.runId !== 'string' || !/^\d{14}-[0-9a-f]{4}$/i.test(value.runId)) throw Object.assign(new Error('Cancel requires the active run ID.'), { statusCode: 400 });
+  return { runId: value.runId };
+}
+
 function validateOperationRequest(request) {
   if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) {
     throw Object.assign(new Error('Operation requests require application/json.'), { statusCode: 415 });
@@ -84,13 +92,10 @@ function projectedPaths(directory, result = new Set()) {
   return result;
 }
 
-function evidenceTail(project, runId, stream, tail = 200) {
-  const record = runById(project, runId);
-  if (!record) throw Object.assign(new Error('Recorded run was not found.'), { statusCode: 404 });
+function boundedEvidence(path, tail = 200) {
   const count = Number(tail);
   if (!Number.isInteger(count) || count < 1 || count > 500) throw Object.assign(new Error('Evidence tail must be an integer from 1 to 500 lines.'), { statusCode: 400 });
-  const path = stream === 'stdout' ? record.stdoutPath : record.stderrPath;
-  if (!path || !existsSync(path)) throw Object.assign(new Error(`Recorded ${stream} evidence is unavailable.`), { statusCode: 404 });
+  if (!path || !existsSync(path)) return { size: 0, complete: true, returnedBytes: 0, text: '' };
   const size = statSync(path).size;
   const maximum = 64 * 1024;
   const start = Math.max(0, size - maximum);
@@ -101,10 +106,15 @@ function evidenceTail(project, runId, stream, tail = 200) {
   const lines = decoded.split(/\r?\n/);
   if (start > 0) lines.shift();
   const selected = lines.slice(-count);
-  return {
-    runId: record.id, stream, size, complete: start === 0 && selected.length >= lines.length,
-    returnedBytes: Buffer.byteLength(selected.join('\n')), text: selected.join('\n'),
-  };
+  return { size, complete: start === 0 && selected.length >= lines.length, returnedBytes: Buffer.byteLength(selected.join('\n')), text: selected.join('\n') };
+}
+
+function evidenceTail(project, runId, stream, tail = 200) {
+  const record = runById(project, runId);
+  if (!record) throw Object.assign(new Error('Recorded run was not found.'), { statusCode: 404 });
+  const path = stream === 'stdout' ? record.stdoutPath : record.stderrPath;
+  if (!path) throw Object.assign(new Error(`Recorded ${stream} evidence is unavailable.`), { statusCode: 404 });
+  return { runId: record.id, stream, ...boundedEvidence(path, tail) };
 }
 
 async function sourceExcerpt(project, requested, context = 2, runId = null) {
@@ -178,15 +188,23 @@ function sendFile(request, response, path, { cache = 'no-cache' } = {}) {
 
 export function createHudServer(project) {
   let activeOperation = null;
-  const runTypedOperation = async (type, label, action) => {
+  let activeExecution = null;
+  const runTypedOperation = async (type, label, action, { cancellable = false } = {}) => {
     if (activeOperation) {
       const error = Object.assign(new Error(`CommandHUD is busy with ${activeOperation.type}: ${activeOperation.label}`), { statusCode: 409 });
       error.busy = activeOperation;
       throw error;
     }
-    activeOperation = { type, label, startedAt: new Date().toISOString() };
-    try { return await action(); }
-    finally { activeOperation = null; }
+    const controller = new AbortController();
+    activeOperation = { type, label, state: 'starting', startedAt: new Date().toISOString(), runId: null, cancellable };
+    activeExecution = { controller, stdoutPath: null, stderrPath: null };
+    const onStart = (value) => {
+      activeOperation = { ...activeOperation, state: 'running', runId: value.runId, command: value.command, startedAt: value.startedAt };
+      activeExecution.stdoutPath = value.stdoutPath;
+      activeExecution.stderrPath = value.stderrPath;
+    };
+    try { return await action({ signal: controller.signal, onStart }); }
+    finally { activeOperation = null; activeExecution = null; }
   };
   return createServer(async (request, response) => {
     try {
@@ -209,11 +227,28 @@ export function createHudServer(project) {
         });
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/operations/cancel') {
+        validateOperationRequest(request);
+        const operation = cancelRequest(await jsonBody(request));
+        if (!activeOperation || !activeExecution || activeOperation.runId !== operation.runId || !activeOperation.cancellable) {
+          throw Object.assign(new Error('The requested run is not the active cancellable operation.'), { statusCode: 409 });
+        }
+        activeOperation = { ...activeOperation, state: 'cancelling' };
+        activeExecution.controller.abort();
+        json(response, 202, { runId: operation.runId, status: 'cancelling' });
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/operations/repository-command') {
         validateOperationRequest(request);
         const operation = repositoryCommandRequest(await jsonBody(request));
         let record;
-        try { record = await runTypedOperation('repository-command', operation.name, () => runRepositoryCommand(project, operation.name)); }
+        try {
+          record = await runTypedOperation(
+            'repository-command', operation.name,
+            ({ signal, onStart }) => runRepositoryCommand(project, operation.name, { signal, onStart }),
+            { cancellable: true },
+          );
+        }
         catch (error) {
           if (/^Unknown repository command:/.test(error.message)) error.statusCode = 400;
           throw error;
@@ -255,6 +290,15 @@ export function createHudServer(project) {
       }
       if (url.pathname === '/runtime') {
         json(response, 200, { busy: activeOperation });
+        return;
+      }
+      const activeEvidenceMatch = url.pathname.match(/^\/runtime\/evidence\/(stdout|stderr)$/i);
+      if (activeEvidenceMatch) {
+        const runId = url.searchParams.get('run');
+        if (!activeOperation?.runId || runId !== activeOperation.runId || !activeExecution) throw Object.assign(new Error('Active run evidence is unavailable.'), { statusCode: 409 });
+        const stream = activeEvidenceMatch[1].toLowerCase();
+        const path = stream === 'stdout' ? activeExecution.stdoutPath : activeExecution.stderrPath;
+        json(response, 200, { runId, stream, ...boundedEvidence(path, url.searchParams.get('tail') || 200) });
         return;
       }
       if (url.pathname === '/tree') {

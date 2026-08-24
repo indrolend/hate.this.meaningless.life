@@ -21,7 +21,7 @@ function fixtureProject() {
   writeFileSync(join(root, 'media', 'tone.wav'), Buffer.from('RIFFtestWAVE'));
   writeFileSync(join(root, 'media', 'clip.mp4'), Buffer.from('test-mp4'));
   writeFileSync(join(root, 'media', 'clip.mov'), Buffer.from('test-mov'));
-  writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'import { writeFileSync } from "node:fs"; await new Promise((resolve) => setTimeout(resolve, 250)); writeFileSync(new URL("../media/generated.txt", import.meta.url), "created by command\\n"); console.log("x".repeat(70000)); console.log("100% tests passed, 0 tests failed out of 2")\n');
+  writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'import { writeFileSync } from "node:fs"; console.log("STARTED"); writeFileSync(new URL("../media/generated.txt", import.meta.url), "created by command\\n"); await new Promise((resolve) => setTimeout(resolve, 1200)); console.log("x".repeat(70000)); console.log("100% tests passed, 0 tests failed out of 2")\n');
   execFileSync('git', ['init', '-b', 'main'], { cwd: root });
   execFileSync('git', ['config', 'user.email', 'hud@example.invalid'], { cwd: root });
   execFileSync('git', ['config', 'user.name', 'HUD Test'], { cwd: root });
@@ -31,6 +31,29 @@ function fixtureProject() {
     cwd: root,
     env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'hud-server-state-')) },
   });
+}
+
+async function waitForActiveRun(base, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const runtime = await (await fetch(`${base}/runtime`)).json();
+    if (runtime.busy?.runId) return runtime;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('Timed out waiting for an active HUD run.');
+}
+
+async function waitForActiveEvidence(base, runId, pattern, timeoutMs = 2000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const response = await fetch(`${base}/runtime/evidence/stdout?run=${runId}&tail=10`);
+    if (response.ok) {
+      const evidence = await response.json();
+      if (pattern.test(evidence.text)) return evidence;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error('Timed out waiting for active HUD evidence.');
 }
 
 test('HUD server serializes typed operations and exposes bounded evidence, live reads, and media', async (t) => {
@@ -150,10 +173,13 @@ test('HUD server serializes typed operations and exposes bounded evidence, live 
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: 'native-tests' }),
   });
-  await new Promise((resolve) => setTimeout(resolve, 50));
-  const runtimeBusy = await (await fetch(`${base}/runtime`)).json();
+  const runtimeBusy = await waitForActiveRun(base);
   assert.equal(runtimeBusy.busy.type, 'repository-command');
   assert.equal(runtimeBusy.busy.label, 'native-tests');
+  assert.ok(runtimeBusy.busy.runId);
+  const activeEvidence = await waitForActiveEvidence(base, runtimeBusy.busy.runId, /STARTED/);
+  assert.equal(activeEvidence.runId, runtimeBusy.busy.runId);
+  assert.match(activeEvidence.text, /STARTED/);
   const blockedByBusy = await fetch(`${base}/operations/search`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ query: 'RIFF', scope: 'media' }),
@@ -230,4 +256,31 @@ test('HUD server serializes typed operations and exposes bounded evidence, live 
   });
   assert.equal(repeatedUndo.status, 409);
   assert.equal((await fetch(`${base}/undo/not-a-run`)).status, 404);
+
+  const cancellableRequest = fetch(`${base}/operations/repository-command`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ name: 'native-tests' }),
+  });
+  const cancellingRuntime = await waitForActiveRun(base);
+  assert.equal(cancellingRuntime.busy.state, 'running');
+  const cancelResponse = await fetch(`${base}/operations/cancel`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: cancellingRuntime.busy.runId }),
+  });
+  assert.equal(cancelResponse.status, 202);
+  assert.equal((await cancelResponse.json()).status, 'cancelling');
+  const cancelledResponse = await cancellableRequest;
+  assert.equal(cancelledResponse.status, 200);
+  const cancelled = await cancelledResponse.json();
+  assert.equal(cancelled.status, 'cancelled');
+  assert.equal(cancelled.operation.status, 'cancelled');
+  assert.equal(existsSync(join(project.root, 'media', 'generated.txt')), true);
+  assert.equal((await (await fetch(`${base}/runtime`)).json()).busy, null);
+  const undoCancelled = await fetch(`${base}/operations/undo`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: cancelled.runId }),
+  });
+  assert.equal(undoCancelled.status, 200);
+  assert.equal(existsSync(join(project.root, 'media', 'generated.txt')), false);
+  const staleCancel = await fetch(`${base}/operations/cancel`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: cancelled.runId }),
+  });
+  assert.equal(staleCancel.status, 409);
 });
