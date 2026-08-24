@@ -53,3 +53,30 @@ npm.cmd run verify
 For a repository-specific CommandHUD core, use that repository's own documented verification commands.
 
 Read `AGENTS.md` before changing source. `COPILOT-HANDOFF.md` contains integration context, but current code and runtime behavior take precedence over older planning text.
+
+## Launching the CommandHUD bridge
+
+Launch the active bridge from any directory:
+
+```powershell
+$HUD = Join-Path $env:USERPROFILE 'Projects\hate.this.meaningless.life\legacy\commandhud\CommandHud-v21-corebridge.ps1'
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File $HUD
+```
+
+Ownership boundary:
+
+- this repository owns the Windows UI, runspace, command transport, cancellation, and cwd handoff;
+- the active project HUD core owns immutable evidence, Git authority, output reduction, workflow derivation, and semantic presentation;
+- raw command output remains available when semantic presentation is unavailable.
+
+The child process must write its final directory back to the parent runspace. This is what makes `Set-Location` persist across commands; do not move cwd capture back into the parent wrapper.
+
+Relevant bridge history:
+
+```text
+786827a Add workflow-aware CommandHUD bridge
+f9efa72 Resolve CommandHUD core from active repository
+a1ace70 Fall back when CommandHUD core is unavailable
+22ace23 Persist CommandHUD working directory
+ca77006 Persist child command working directory
+```
