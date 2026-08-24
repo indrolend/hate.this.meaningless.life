@@ -38,28 +38,29 @@
   let selected = null;
   let camera = { x: 48, y: 48, z: 0.92 };
   let gesture = null;
-  let category = 'Repository';
   let inputMode = 'terminal';
+  const openMenuSections = new Set(['HUD']);
+  let renderedCommands = [];
 
   const commands = {
+    HUD: [
+      ['Undo latest change', 'Inspect and reverse the newest safe recorded change.', '', 'evidence', null, 'undo'],
+      ['Operation history', 'Browse immutable searches, commands, cancellations, and Undo evidence.', '', 'evidence', null, 'history'],
+      ['Refresh repository', 'Reload live repository and runtime state.', '', 'workspace', null, 'refresh'],
+      ['Copy last handoff', 'Copy compact context for the last structured operation.', '', 'evidence', null, 'handoff'],
+    ],
     Repository: [
       ['Current semantic state', 'Inspect the complete derived HUD snapshot.', 'node tools/hud/cli.mjs state --json', 'HUD'],
       ['Repository tree', 'Inspect the Git-backed repository projection.', 'node tools/hud/cli.mjs tree', 'HUD'],
-      ['Refresh visual snapshot', 'Regenerate the ignored browser-state bridge.', 'node tools/hud/cli.mjs visual-state', 'HUD'],
     ],
     Search: [
-      ['Search repository', 'Run a recorded literal search across the repository.', 'search "" .', 'repository'],
-      ['Search current directory', 'Run a recorded literal search in the visible map scope.', 'search "" {current}', 'current directory'],
-      ['Copy last handoff', 'Copy the compact context for the last structured operation.', 'node tools/hud/cli.mjs handoff --copy', 'HUD'],
+      ['Search repository', 'Run a recorded literal search across the repository.', 'search "" .', 'repository', null, 'search-repository'],
+      ['Search current directory', 'Run a recorded literal search in the visible map scope.', 'search "" {current}', 'current directory', null, 'search-current'],
     ],
     Git: [
       ['Repository status', 'Show branch and concise worktree state.', 'git status --short --branch', 'repository'],
       ['Review all changes', 'Show the current worktree patch.', 'git diff', 'worktree'],
       ['Recent commits', 'Show recent checkpoints.', 'git log -8 --oneline --decorate', 'repository'],
-    ],
-    Test: [
-      ['HUD contract suite', 'Run the repository’s declared HUD verification.', 'npm run hud:test', 'tools/hud'],
-      ['Project test command', 'Run the test command declared by package.json.', 'npm test', 'repository'],
     ],
     Selection: [
       ['Review selected changes', 'Show the selected file’s Git patch.', 'git diff -- {selection}', 'selection'],
@@ -87,7 +88,7 @@
     ]);
   }
   const groupLabel = (name) => name.length <= 3 ? name.toUpperCase() : `${name[0].toUpperCase()}${name.slice(1)}`;
-  for (const name of [...libraryGroups.keys()].sort()) commands[`Library · ${groupLabel(name)}`] = libraryGroups.get(name);
+  for (const name of [...libraryGroups.keys()].sort()) commands[`Commands · ${groupLabel(name)}`] = libraryGroups.get(name);
 
   function indexDirectory(directory) {
     directoriesByPath.set(directory.path, directory);
@@ -489,38 +490,37 @@
     $('#outputResults').replaceChildren();
   }
 
-  function filteredCommands() {
-    const query = $('#pickerSearch').value.toLowerCase();
-    const available = query ? Object.values(commands).flat() : commands[category];
-    return available.filter((command) => command.join(' ').toLowerCase().includes(query));
-  }
-
   function renderPicker() {
-    const categories = $('#categories');
-    categories.replaceChildren();
-    for (const name of Object.keys(commands)) {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = `category${name === category ? ' selected' : ''}`;
-      button.dataset.category = name;
-      button.textContent = name;
-      categories.appendChild(button);
-    }
     const list = $('#pickerList');
     list.replaceChildren();
-    filteredCommands().forEach((command, index) => {
-      const button = document.createElement('button');
-      button.type = 'button';
-      button.className = 'command-item';
-      button.dataset.command = index;
-      for (const [className, text] of [['command-name', command[0]], ['scope', command[3]], ['command-desc', command[1]], ['command-code', resolved(command[2])]]) {
-        const element = document.createElement('span');
-        element.className = className;
-        element.textContent = text;
-        button.appendChild(element);
+    renderedCommands = [];
+    const query = $('#pickerSearch').value.toLowerCase();
+    for (const [section, commandsInSection] of Object.entries(commands)) {
+      const matching = commandsInSection.filter((command) => !query || command.join(' ').toLowerCase().includes(query));
+      if (!matching.length) continue;
+      const expanded = Boolean(query) || openMenuSections.has(section);
+      const heading = document.createElement('button');
+      heading.type = 'button';
+      heading.className = 'command-section';
+      heading.dataset.section = section;
+      heading.setAttribute('aria-expanded', String(expanded));
+      heading.textContent = `${expanded ? '▾' : '▸'} ${section}`;
+      list.appendChild(heading);
+      if (!expanded) continue;
+      for (const command of matching) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'command-item';
+        button.dataset.command = renderedCommands.push(command) - 1;
+        for (const [className, text] of [['command-name', command[0]], ['scope', command[3]], ['command-desc', command[1]], ['command-code', resolved(command[2])]]) {
+          const element = document.createElement('span');
+          element.className = className;
+          element.textContent = text;
+          button.appendChild(element);
+        }
+        list.appendChild(button);
       }
-      list.appendChild(button);
-    });
+    }
   }
 
   function togglePicker(force) {
@@ -1044,9 +1044,6 @@
     const closed = app.classList.toggle('tree-closed');
     $('#treeToggle').setAttribute('aria-expanded', String(!closed));
   });
-  $('#refreshState').addEventListener('click', () => window.location.reload());
-  $('#historyButton').addEventListener('click', showHistory);
-  $('#undoButton').addEventListener('click', showLatestUndo);
   $('#zoomIn').onclick = () => setZoom(camera.z * 1.15);
   $('#zoomOut').onclick = () => setZoom(camera.z * 0.87);
   $('#zoomReset').onclick = resetCamera;
@@ -1058,26 +1055,27 @@
     input.focus();
   };
   toolkit.onclick = () => togglePicker();
-  $('#categories').onclick = (event) => {
-    if (!event.target.dataset.category) return;
-    category = event.target.dataset.category;
-    renderPicker();
-  };
   $('#pickerSearch').oninput = renderPicker;
   $('#pickerList').onclick = (event) => {
+    const sectionButton = event.target.closest('[data-section]');
+    if (sectionButton) {
+      const section = sectionButton.dataset.section;
+      if (openMenuSections.has(section)) openMenuSections.delete(section);
+      else openMenuSections.add(section);
+      renderPicker();
+      return;
+    }
     const button = event.target.closest('[data-command]');
     if (!button) return;
-    const chosen = filteredCommands()[Number(button.dataset.command)];
-    if (chosen[0] === 'Copy last handoff') {
-      togglePicker(false);
-      copyHandoff();
-      return;
-    }
-    if (chosen[0] === 'Search repository' || chosen[0] === 'Search current directory') {
-      togglePicker(false);
-      enterSearchMode(chosen[0] === 'Search current directory' ? '{current}' : '.');
-      return;
-    }
+    const chosen = renderedCommands[Number(button.dataset.command)];
+    if (!chosen) return;
+    const action = chosen[5];
+    if (action) togglePicker(false);
+    if (action === 'handoff') return copyHandoff();
+    if (action === 'history') return showHistory();
+    if (action === 'undo') return showLatestUndo();
+    if (action === 'refresh') return window.location.reload();
+    if (action === 'search-repository' || action === 'search-current') return enterSearchMode(action === 'search-current' ? '{current}' : '.');
     if (chosen[4]) {
       confirmRepositoryCommand(chosen);
       return;
