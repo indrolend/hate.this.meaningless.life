@@ -190,6 +190,10 @@ When `hud serve` starts, it examines unfinished journals before accepting operat
 
 If a journal's process ID still appears active, startup fails closed instead of starting a competing operation runtime or killing a process whose identity cannot be proven safely. The user can wait for or inspect that detached process before restarting CommandHUD. This recovery is local evidence repair, not resumable execution: CommandHUD does not reconnect to the old process stream or continue the command.
 
+Mutable project registration/state, in-flight journals, and final run records are published with same-directory atomic JSON writes: CommandHUD writes and flushes a uniquely named temporary file before renaming it into place. Immutable journals and run records additionally refuse to replace an existing destination. Temporary files are removed if publication fails.
+
+Recovery validates the journal schema, project/run identity, process and command metadata, starting Git evidence, worktree tree, and exact stdout/stderr locations before reading anything. A malformed or truncated journal remains untouched and is reported as corrupt; `hud serve` refuses to start the operation runtime until that evidence is inspected. CommandHUD does not silently discard, reinterpret, or follow paths from damaged journal content.
+
 In the live renderer, submitting Search sends structured `query` and `scope` JSON rather than a command string. The runtime validates it, runs `rg` directly without a shell, records the evidence, and returns refreshed semantic state. Snapshot mode keeps the same Search controls but only copies the equivalent CLI command without claiming execution.
 
 `hud visual-state` remains a compatibility path for static hosting. It writes ignored `hud-state.js`, which contains machine-specific paths and transient Git state. Static mode can navigate that snapshot but cannot stream repository media. The browser command bar stages and copies exact commands; actual command execution remains owned by the CLI and Windows bridge.

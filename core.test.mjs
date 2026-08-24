@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -56,6 +56,7 @@ test('repository command execution resolves a current discovered identity and re
   assert.equal(readFileSync(join(root, 'file.txt'), 'utf8'), 'changed by command\n');
   assert.deepEqual(record.delta.paths, ['file.txt']);
   assert.equal(existsSync(join(project.store, 'runs', project.key, record.id, 'inflight.json')), false);
+  assert.equal(readdirSync(join(project.store, 'runs', project.key, record.id)).some((name) => name.endsWith('.tmp')), false);
   assert.match(buildOperationHandoff(project, record), new RegExp(`RAW run:${record.id}`));
   assert.deepEqual(await operationHistory(project), [{
     runId: record.id, type: 'repository-command', name: 'native-tests', query: null, scope: '.',
@@ -141,7 +142,7 @@ test('startup recovery records inactive in-flight evidence and preserves Undo', 
     operationIdentity: { type: 'repository-command', name: 'fixture', displayCommand: 'node fixture.mjs' },
   }));
 
-  assert.deepEqual(await recoverInterruptedRuns(project), { recovered: [id], detached: [] });
+  assert.deepEqual(await recoverInterruptedRuns(project), { recovered: [id], detached: [], corrupt: [] });
   const record = runById(project, id);
   assert.equal(record.status, 'interrupted');
   assert.equal(record.exitCode, null);
@@ -152,20 +153,39 @@ test('startup recovery records inactive in-flight evidence and preserves Undo', 
   assert.equal((await undoPlan(project, id)).state, 'SAFE');
   await undoOperation(project, id);
   assert.equal(existsSync(join(project.root, 'interrupted.txt')), false);
-  assert.deepEqual(await recoverInterruptedRuns(project), { recovered: [], detached: [] });
+  assert.deepEqual(await recoverInterruptedRuns(project), { recovered: [], detached: [], corrupt: [] });
 
   const liveId = '20260824220100-beef';
   const liveDirectory = join(project.store, 'runs', project.key, liveId);
   const liveStartedAt = new Date().toISOString();
   mkdirSync(liveDirectory, { recursive: true });
+  const liveStdout = join(liveDirectory, 'stdout.log');
+  const liveStderr = join(liveDirectory, 'stderr.log');
+  writeFileSync(liveStdout, 'still running\n');
+  writeFileSync(liveStderr, '');
   writeFileSync(join(liveDirectory, 'inflight.json'), JSON.stringify({
-    id: liveId, project: project.identity.id, pid: process.pid,
-    command: 'node still-running.mjs', startedAt: liveStartedAt,
+    schemaVersion: 1, id: liveId, project: project.identity.id, root: project.root, pid: process.pid,
+    command: 'node still-running.mjs', argv: ['node', 'still-running.mjs'], startedAt: liveStartedAt,
+    captureDelta: true, treeBefore, gitBefore: before, currencyBefore,
+    stdoutPath: liveStdout, stderrPath: liveStderr,
   }));
   assert.deepEqual(await recoverInterruptedRuns(project), {
-    recovered: [], detached: [{ runId: liveId, pid: process.pid, command: 'node still-running.mjs', startedAt: liveStartedAt }],
+    recovered: [], detached: [{ runId: liveId, pid: process.pid, command: 'node still-running.mjs', startedAt: liveStartedAt }], corrupt: [],
   });
   rmSync(liveDirectory, { recursive: true, force: true });
+
+  const corruptId = '20260824220200-baad';
+  const corruptDirectory = join(project.store, 'runs', project.key, corruptId);
+  mkdirSync(corruptDirectory, { recursive: true });
+  writeFileSync(join(corruptDirectory, 'inflight.json'), '{"truncated":');
+  const corruption = await recoverInterruptedRuns(project);
+  assert.deepEqual(corruption.recovered, []);
+  assert.deepEqual(corruption.detached, []);
+  assert.equal(corruption.corrupt.length, 1);
+  assert.equal(corruption.corrupt[0].runId, corruptId);
+  assert.match(corruption.corrupt[0].reason, /valid JSON object evidence/);
+  assert.equal(readFileSync(join(corruptDirectory, 'inflight.json'), 'utf8'), '{"truncated":');
+  rmSync(corruptDirectory, { recursive: true, force: true });
 });
 
 test('reducers retain concise evidence and cause classification', () => {

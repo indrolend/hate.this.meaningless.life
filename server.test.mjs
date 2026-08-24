@@ -56,6 +56,15 @@ async function waitForActiveEvidence(base, runId, pattern, timeoutMs = 2000) {
   throw new Error('Timed out waiting for active HUD evidence.');
 }
 
+test('HUD server refuses corrupt interrupted evidence', async () => {
+  const project = await fixtureProject();
+  const id = '20260824220300-cafe';
+  const directory = join(project.store, 'runs', project.key, id);
+  mkdirSync(directory, { recursive: true });
+  writeFileSync(join(directory, 'inflight.json'), '{"truncated":');
+  await assert.rejects(() => startHudServer(project, { port: 0 }), new RegExp(`Interrupted evidence is corrupt for run ${id}`));
+});
+
 test('HUD server serializes typed operations and exposes bounded evidence, live reads, and media', async (t) => {
   const project = await fixtureProject();
   await searchRepository(project, 'RIFF', 'media');

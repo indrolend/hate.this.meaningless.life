@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, createWriteStream, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, platform, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -55,6 +55,27 @@ function readJson(path) {
   try { return JSON.parse(readFileSync(path, 'utf8')); } catch { return null; }
 }
 
+function atomicWriteJson(path, value, { exclusive = false } = {}) {
+  const directory = dirname(path);
+  mkdirSync(directory, { recursive: true });
+  const temporary = join(directory, `.${basename(path)}.${process.pid}.${randomBytes(4).toString('hex')}.tmp`);
+  const content = `${JSON.stringify(value, null, 2)}\n`;
+  let descriptor = null;
+  try {
+    descriptor = openSync(temporary, 'wx');
+    writeFileSync(descriptor, content);
+    fsyncSync(descriptor);
+    closeSync(descriptor);
+    descriptor = null;
+    if (exclusive && existsSync(path)) throw new Error(`Refusing to replace immutable JSON: ${path}`);
+    renameSync(temporary, path);
+  } catch (error) {
+    if (descriptor !== null) closeSync(descriptor);
+    rmSync(temporary, { force: true });
+    throw error;
+  }
+}
+
 function projectStatePath(project) {
   return join(project.store, 'projects', project.key, 'state.json');
 }
@@ -68,9 +89,7 @@ export function readProjectState(project) {
 }
 
 function writeProjectState(project, state) {
-  const directory = dirname(projectStatePath(project));
-  mkdirSync(directory, { recursive: true });
-  writeFileSync(projectStatePath(project), `${JSON.stringify({ ...state, schemaVersion: SCHEMA_VERSION }, null, 2)}\n`);
+  atomicWriteJson(projectStatePath(project), { ...state, schemaVersion: SCHEMA_VERSION });
 }
 
 function projectKey(identity) {
@@ -106,7 +125,7 @@ function registerProject(project, store) {
   const directory = join(store, 'projects');
   mkdirSync(directory, { recursive: true });
   const record = { schemaVersion: SCHEMA_VERSION, id: project.identity.id, root: project.root };
-  writeFileSync(join(directory, `${projectKey(project.identity)}.json`), `${JSON.stringify(record, null, 2)}\n`);
+  atomicWriteJson(join(directory, `${projectKey(project.identity)}.json`), record);
   return { ...project, store, key: projectKey(project.identity) };
 }
 
@@ -520,12 +539,12 @@ export async function runCommand(project, tokens, {
   };
   const inflightPath = join(runDirectory, 'inflight.json');
   try {
-    writeFileSync(inflightPath, `${JSON.stringify({
+    atomicWriteJson(inflightPath, {
       schemaVersion: SCHEMA_VERSION, id, project: project.identity.id, root: project.root,
       request: request || null, command, argv: tokens, objective: objective || null,
       startedAt: started.toISOString(), pid: child.pid, captureDelta, treeBefore,
       gitBefore: before, currencyBefore, stdoutPath, stderrPath, operationIdentity,
-    }, null, 2)}\n`, { flag: 'wx' });
+    }, { exclusive: true });
   } catch (error) {
     await terminate(true);
     stdoutFile.end(); stderrFile.end();
@@ -597,7 +616,7 @@ export async function runCommand(project, tokens, {
   if (operationReducer) record.operation = operationReducer({ stdout, stderr, exitCode, command, record });
   record.presentation = buildPresentation(record);
   record.packet = buildPacket(record);
-  writeFileSync(join(runDirectory, 'run.json'), `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx' });
+  atomicWriteJson(join(runDirectory, 'run.json'), record, { exclusive: true });
   unlinkSync(inflightPath);
   const state = readProjectState(project);
   state.lastRunId = id;
@@ -611,18 +630,36 @@ function processAppearsAlive(pid) {
   catch (error) { return error?.code === 'EPERM'; }
 }
 
+function interruptedJournalProblem(project, runDirectory, id, value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return 'Journal is not valid JSON object evidence.';
+  if (value.schemaVersion !== SCHEMA_VERSION) return `Unsupported journal schema: ${value.schemaVersion}`;
+  if (value.id !== id || value.project !== project.identity.id || resolve(value.root || '') !== resolve(project.root)) return 'Journal identity does not match this verified project and run.';
+  if (!Number.isInteger(value.pid) || value.pid <= 0) return 'Journal has no valid process identity.';
+  if (typeof value.command !== 'string' || !value.command || !Array.isArray(value.argv) || value.argv.some((part) => typeof part !== 'string')) return 'Journal has no valid command identity.';
+  if (!Number.isFinite(Date.parse(value.startedAt || ''))) return 'Journal has no valid start time.';
+  if (!value.gitBefore?.head || !value.currencyBefore) return 'Journal is missing starting repository evidence.';
+  if (value.captureDelta && !/^[0-9a-f]{40}$/i.test(value.treeBefore || '')) return 'Journal is missing its pre-operation worktree tree.';
+  if (resolve(value.stdoutPath || '') !== resolve(runDirectory, 'stdout.log') || resolve(value.stderrPath || '') !== resolve(runDirectory, 'stderr.log')) return 'Journal evidence paths escape the immutable run directory.';
+  return null;
+}
+
 export async function recoverInterruptedRuns(project) {
   const runsRoot = join(project.store, 'runs', project.key);
-  if (!existsSync(runsRoot)) return { recovered: [], detached: [] };
+  if (!existsSync(runsRoot)) return { recovered: [], detached: [], corrupt: [] };
   const recovered = [];
   const detached = [];
+  const corrupt = [];
   for (const id of readdirSync(runsRoot).sort()) {
     if (!/^\d{14}-[0-9a-f]{4}$/i.test(id)) continue;
     const runDirectory = join(runsRoot, id);
     const inflightPath = join(runDirectory, 'inflight.json');
     if (existsSync(join(runDirectory, 'run.json')) || !existsSync(inflightPath)) continue;
     const inflight = readJson(inflightPath);
-    if (!inflight || inflight.id !== id || inflight.project !== project.identity.id) continue;
+    const problem = interruptedJournalProblem(project, runDirectory, id, inflight);
+    if (problem) {
+      corrupt.push({ runId: id, journal: inflightPath, reason: problem });
+      continue;
+    }
     if (processAppearsAlive(inflight.pid)) {
       detached.push({ runId: id, pid: inflight.pid, command: inflight.command, startedAt: inflight.startedAt });
       continue;
@@ -661,14 +698,14 @@ export async function recoverInterruptedRuns(project) {
     }
     record.presentation = buildPresentation(record);
     record.packet = buildPacket(record);
-    writeFileSync(join(runDirectory, 'run.json'), `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx' });
+    atomicWriteJson(join(runDirectory, 'run.json'), record, { exclusive: true });
     unlinkSync(inflightPath);
     const state = readProjectState(project);
     state.lastRunId = id;
     writeProjectState(project, state);
     recovered.push(id);
   }
-  return { recovered, detached };
+  return { recovered, detached, corrupt };
 }
 
 export function parseSearchOutput(stdout) {

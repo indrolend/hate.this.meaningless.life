@@ -373,6 +373,10 @@ export function createHudServer(project) {
 
 export async function startHudServer(project, { host = '127.0.0.1', port = 8765 } = {}) {
   const recovery = await recoverInterruptedRuns(project);
+  if (recovery.corrupt.length) {
+    const run = recovery.corrupt[0];
+    throw new Error(`Interrupted evidence is corrupt for run ${run.runId}: ${run.reason} Refusing to start the operation runtime.`);
+  }
   if (recovery.detached.length) {
     const run = recovery.detached[0];
     throw new Error(`A detached CommandHUD process still appears active for run ${run.runId}. Refusing to start another operation runtime.`);
