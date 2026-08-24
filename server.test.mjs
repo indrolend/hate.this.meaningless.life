@@ -21,7 +21,7 @@ function fixtureProject() {
   writeFileSync(join(root, 'media', 'tone.wav'), Buffer.from('RIFFtestWAVE'));
   writeFileSync(join(root, 'media', 'clip.mp4'), Buffer.from('test-mp4'));
   writeFileSync(join(root, 'media', 'clip.mov'), Buffer.from('test-mov'));
-  writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync(new URL("../media/generated.txt", import.meta.url), "created by command\\n"); console.log("100% tests passed, 0 tests failed out of 2")\n');
+  writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'import { writeFileSync } from "node:fs"; await new Promise((resolve) => setTimeout(resolve, 250)); writeFileSync(new URL("../media/generated.txt", import.meta.url), "created by command\\n"); console.log("x".repeat(70000)); console.log("100% tests passed, 0 tests failed out of 2")\n');
   execFileSync('git', ['init', '-b', 'main'], { cwd: root });
   execFileSync('git', ['config', 'user.email', 'hud@example.invalid'], { cwd: root });
   execFileSync('git', ['config', 'user.name', 'HUD Test'], { cwd: root });
@@ -33,7 +33,7 @@ function fixtureProject() {
   });
 }
 
-test('HUD server exposes live reads, typed operations, and byte-range media without arbitrary execution', async (t) => {
+test('HUD server serializes typed operations and exposes bounded evidence, live reads, and media', async (t) => {
   const project = await fixtureProject();
   await searchRepository(project, 'RIFF', 'media');
   const running = await startHudServer(project, { port: 0 });
@@ -146,10 +146,21 @@ test('HUD server exposes live reads, typed operations, and byte-range media with
   assert.equal(crossOrigin.status, 403);
   assert.equal((await (await fetch(`${base}/state`)).json()).last.runId, runBeforeInvalid);
 
-  const commandResponse = await fetch(`${base}/operations/repository-command`, {
+  const commandRequest = fetch(`${base}/operations/repository-command`, {
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: 'native-tests' }),
   });
+  await new Promise((resolve) => setTimeout(resolve, 50));
+  const runtimeBusy = await (await fetch(`${base}/runtime`)).json();
+  assert.equal(runtimeBusy.busy.type, 'repository-command');
+  assert.equal(runtimeBusy.busy.label, 'native-tests');
+  const blockedByBusy = await fetch(`${base}/operations/search`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ query: 'RIFF', scope: 'media' }),
+  });
+  assert.equal(blockedByBusy.status, 409);
+  assert.equal((await blockedByBusy.json()).busy.type, 'repository-command');
+  const commandResponse = await commandRequest;
   assert.equal(commandResponse.status, 200);
   const command = await commandResponse.json();
   assert.equal(command.status, 'pass');
@@ -158,6 +169,7 @@ test('HUD server exposes live reads, typed operations, and byte-range media with
   assert.deepEqual(command.operation.summary, ['2/2 CTest']);
   assert.equal(command.state.last.runId, command.runId);
   assert.deepEqual(command.state.lastOperation, command.operation);
+  assert.equal((await (await fetch(`${base}/runtime`)).json()).busy, null);
 
   const commandRunId = command.runId;
   for (const body of [{ name: '' }, { name: 'not-declared' }, { name: 'native-tests', command: 'powershell' }]) {
@@ -182,6 +194,18 @@ test('HUD server exposes live reads, typed operations, and byte-range media with
   assert.deepEqual(detail.operation, search.operation);
   assert.match(detail.handoff, new RegExp(`RAW run:${search.runId}`));
   assert.equal((await fetch(`${base}/history/${search.runId}/handoff`)).status, 200);
+  const stdoutEvidenceResponse = await fetch(`${base}/history/${commandRunId}/evidence/stdout?tail=3`);
+  assert.equal(stdoutEvidenceResponse.status, 200);
+  const stdoutEvidence = await stdoutEvidenceResponse.json();
+  assert.equal(stdoutEvidence.complete, false);
+  assert.ok(stdoutEvidence.size > 64 * 1024);
+  assert.match(stdoutEvidence.text, /100% tests passed/);
+  assert.ok(stdoutEvidence.returnedBytes < 64 * 1024);
+  const stderrEvidence = await (await fetch(`${base}/history/${commandRunId}/evidence/stderr?tail=10`)).json();
+  assert.equal(stderrEvidence.complete, true);
+  assert.equal(stderrEvidence.size, 0);
+  assert.equal((await fetch(`${base}/history/${commandRunId}/evidence/stdout?tail=501`)).status, 400);
+  assert.equal((await fetch(`${base}/history/not-a-run/evidence/stdout`)).status, 404);
   assert.equal((await fetch(`${base}/history/not-a-run`)).status, 404);
   assert.equal((await fetch(`${base}/history?limit=0`)).status, 400);
   const historicalSource = await fetch(`${base}/source?path=${encodeURIComponent('media/tone.wav')}&context=0&run=${search.runId}`);

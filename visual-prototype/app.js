@@ -4,11 +4,14 @@
   const $ = (selector) => document.querySelector(selector);
   let liveState = false;
   let state = window.commandHudRealState;
+  let runtime = null;
   try {
     const response = await fetch('/state', { cache: 'no-store' });
     if (response.ok && response.headers.get('content-type')?.includes('application/json')) {
       state = await response.json();
       liveState = true;
+      const runtimeResponse = await fetch('/runtime', { cache: 'no-store' });
+      if (runtimeResponse.ok) runtime = await runtimeResponse.json();
     }
   } catch {}
   const repository = state?.repository;
@@ -63,13 +66,28 @@
       ['Open selected file', 'Prepare the conventional editor command.', 'code --goto {selection}', 'selection'],
     ],
   };
-  commands.Library = (state?.commands || []).map((entry) => [
-    entry.name.startsWith('npm:') ? entry.name.slice(4) : entry.name,
-    entry.name.startsWith('npm:') ? 'Script declared by this repository.' : 'Command adapter discovered in this repository.',
-    entry.command,
-    entry.name.startsWith('npm:') ? 'package script' : 'repository tool',
-    entry.name,
-  ]);
+  const discovered = state?.commands || [];
+  const packageNames = discovered.filter((entry) => entry.name.startsWith('npm:')).map((entry) => entry.name.slice(4));
+  const namespaces = new Set(packageNames.filter((name) => name.includes(':')).map((name) => name.split(':')[0]));
+  const libraryGroups = new Map();
+  for (const entry of discovered) {
+    const packageScript = entry.name.startsWith('npm:');
+    const rawName = packageScript ? entry.name.slice(4) : entry.name;
+    const prefix = packageScript && (rawName.includes(':') || namespaces.has(rawName)) ? rawName.split(':')[0] : packageScript ? 'general' : 'tools';
+    const displayName = packageScript && prefix !== 'general'
+      ? rawName.includes(':') ? rawName.slice(prefix.length + 1) : 'default'
+      : rawName;
+    if (!libraryGroups.has(prefix)) libraryGroups.set(prefix, []);
+    libraryGroups.get(prefix).push([
+      displayName,
+      packageScript ? 'Script declared by this repository.' : 'Command adapter discovered in this repository.',
+      entry.command,
+      packageScript ? 'package script' : 'repository tool',
+      entry.name,
+    ]);
+  }
+  const groupLabel = (name) => name.length <= 3 ? name.toUpperCase() : `${name[0].toUpperCase()}${name.slice(1)}`;
+  for (const name of [...libraryGroups.keys()].sort()) commands[`Library · ${groupLabel(name)}`] = libraryGroups.get(name);
 
   function indexDirectory(directory) {
     directoriesByPath.set(directory.path, directory);
@@ -86,6 +104,21 @@
 
   function countChanged() {
     return [...filesByPath.values()].filter((file) => file.gitStatus).length;
+  }
+
+  function showRuntime(value = null) {
+    runtime = value;
+    const label = $('#runtimeState');
+    label.textContent = value?.busy ? `busy · ${value.busy.type}` : liveState ? 'ready' : 'static';
+    label.className = value?.busy ? 'warn' : 'good';
+  }
+
+  async function refreshRuntime() {
+    if (!liveState) return showRuntime(null);
+    try {
+      const response = await fetch('/runtime', { cache: 'no-store' });
+      if (response.ok) showRuntime(await response.json());
+    } catch {}
   }
 
   function descendants(directory) {
@@ -458,7 +491,8 @@
 
   function filteredCommands() {
     const query = $('#pickerSearch').value.toLowerCase();
-    return commands[category].filter((command) => command.join(' ').toLowerCase().includes(query));
+    const available = query ? Object.values(commands).flat() : commands[category];
+    return available.filter((command) => command.join(' ').toLowerCase().includes(query));
   }
 
   function renderPicker() {
@@ -563,6 +597,35 @@
     $('#outputText').textContent += copied ? '\n\nHandoff copied.' : '\n\nHandoff is ready but clipboard access was unavailable.';
   }
 
+  function appendEvidenceActions(actions, runId) {
+    actions.append(
+      outputAction('Raw stdout', '', () => showEvidence(runId, 'stdout')),
+      outputAction('Raw stderr', '', () => showEvidence(runId, 'stderr')),
+    );
+  }
+
+  async function showEvidence(runId, stream) {
+    output.classList.add('open');
+    $('#outputTitle').textContent = `Loading ${stream}`;
+    $('#outputText').textContent = `run:${runId}`;
+    $('#outputResults').replaceChildren();
+    const actions = $('#outputActions');
+    actions.replaceChildren();
+    actions.classList.remove('open');
+    try {
+      const response = await fetch(`/history/${encodeURIComponent(runId)}/evidence/${stream}?tail=200`, { cache: 'no-store' });
+      const value = await response.json();
+      if (!response.ok) throw new Error(value.error || `Evidence request failed with HTTP ${response.status}.`);
+      $('#outputTitle').textContent = `${stream.toUpperCase()} · run:${runId}`;
+      $('#outputText').textContent = `${value.size} bytes · ${value.complete ? 'complete' : 'bounded tail'}\n\n${value.text || '(empty)'}`;
+      actions.replaceChildren(outputAction('Back to operation', '', () => showHistoryDetail(runId)));
+      actions.classList.add('open');
+    } catch (error) {
+      $('#outputTitle').textContent = 'Evidence unavailable';
+      $('#outputText').textContent = error.message;
+    }
+  }
+
   function activateRecordedSearch(detail) {
     search = detail.operation;
     activeSearchRunId = detail.runId;
@@ -582,6 +645,7 @@
     renderSearchResults(search, detail.runId);
     const actions = $('#outputActions');
     actions.replaceChildren(outputAction('Copy handoff', 'confirm', () => copyRecordedHandoff(detail)));
+    appendEvidenceActions(actions, detail.runId);
     actions.classList.add('open');
   }
 
@@ -599,6 +663,7 @@
       $('#outputText').textContent = `${detail.operation.command}\n\n${detail.status.toUpperCase()} · ${summary}\n${(detail.durationMs / 1000).toFixed(1)}s\nRaw evidence: run:${detail.runId}`;
       const actions = $('#outputActions');
       actions.replaceChildren(outputAction('Copy handoff', '', () => copyRecordedHandoff(detail)));
+      appendEvidenceActions(actions, detail.runId);
       const planResponse = await fetch(`/undo/${encodeURIComponent(detail.runId)}`, { cache: 'no-store' });
       const plan = await planResponse.json();
       if (planResponse.ok && plan.state === 'SAFE') {
@@ -634,12 +699,13 @@
     actions.classList.remove('open');
     $('#outputTitle').textContent = `${verb} running`;
     $('#outputText').textContent = `Safely applying the recorded inverse for run:${runId}…`;
+    showRuntime({ busy: { type: 'undo' } });
     try {
       const response = await fetch('/operations/undo', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId }),
       });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || `${verb} failed with HTTP ${response.status}.`);
+      if (!response.ok) { if (result.busy) showRuntime({ busy: result.busy }); throw new Error(result.error || `${verb} failed with HTTP ${response.status}.`); }
       state = result.state;
       $('#outputTitle').textContent = `${verb} ${result.status}`;
       $('#outputText').textContent = `${result.operation.fileCount} files restored\n${(result.operation.durationMs / 1000).toFixed(1)}s\n\n${result.operation.paths.join('\n')}\n\nRaw evidence: run:${result.runId}`;
@@ -651,10 +717,13 @@
         outputAction('Copy handoff', '', copyHandoff),
         outputAction('Refresh repository', 'confirm', () => window.location.reload()),
       );
+      appendEvidenceActions(actions, result.runId);
       actions.classList.add('open');
+      showRuntime({ busy: null });
     } catch (error) {
       $('#outputTitle').textContent = `${verb} refused`;
       $('#outputText').textContent = error.message;
+      refreshRuntime();
     }
   }
 
@@ -732,6 +801,7 @@
     $('#outputTitle').textContent = 'Search running';
     $('#outputText').textContent = `SEARCH\nQUERY ${operation.query}\nSCOPE ${operation.scope}\n\nWaiting for the local runtime…`;
     $('.run').disabled = true;
+    showRuntime({ busy: { type: 'search' } });
     try {
       const response = await fetch('/operations/search', {
         method: 'POST',
@@ -739,7 +809,7 @@
         body: JSON.stringify(operation),
       });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || `Search request failed with HTTP ${response.status}.`);
+      if (!response.ok) { if (result.busy) showRuntime({ busy: result.busy }); throw new Error(result.error || `Search request failed with HTTP ${response.status}.`); }
       $('#outputTitle').textContent = `Search ${result.status}`;
       $('#outputText').textContent = `${result.operation.command}\n\n${result.operation.matchCount} matches in ${result.operation.fileCount} files\nRaw evidence: run:${result.runId}\n\nRefreshing repository state…`;
       window.setTimeout(() => window.location.reload(), 250);
@@ -747,6 +817,7 @@
       $('#outputTitle').textContent = 'Search rejected';
       $('#outputText').textContent = error.message;
       $('.run').disabled = false;
+      refreshRuntime();
     }
   }
 
@@ -783,13 +854,14 @@
     actions.classList.remove('open');
     $('#outputTitle').textContent = 'Repository command running';
     $('#outputText').textContent = `${name}\n\nWaiting for the local runtime…`;
+    showRuntime({ busy: { type: 'repository-command' } });
     try {
       const response = await fetch('/operations/repository-command', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ name }),
       });
       const result = await response.json();
-      if (!response.ok) throw new Error(result.error || `Repository command failed with HTTP ${response.status}.`);
+      if (!response.ok) { if (result.busy) showRuntime({ busy: result.busy }); throw new Error(result.error || `Repository command failed with HTTP ${response.status}.`); }
       state = result.state;
       const summary = result.operation.summary.length ? result.operation.summary.join('; ') : `exit ${result.operation.exitCode}`;
       $('#outputTitle').textContent = `${result.operation.name} ${result.status}`;
@@ -802,10 +874,13 @@
       $('#searchState').className = '';
       document.querySelectorAll('.search-match').forEach((element) => element.classList.remove('search-match'));
       actions.replaceChildren(outputAction('Copy handoff', 'confirm', copyHandoff));
+      appendEvidenceActions(actions, result.runId);
       actions.classList.add('open');
+      showRuntime({ busy: null });
     } catch (error) {
       $('#outputTitle').textContent = 'Repository command rejected';
       $('#outputText').textContent = error.message;
+      refreshRuntime();
     }
   }
 
@@ -827,12 +902,18 @@
   $('#changeCount').className = countChanged() ? 'warn' : 'good';
   $('#snapshotState').textContent = state.git.head.slice(0, 7);
   $('#snapshotState').className = state.git.dirty ? 'warn' : 'good';
+  showRuntime(runtime);
   if (search) {
     $('#searchState').textContent = `${search.matchCount} / ${search.fileCount}`;
     $('#searchState').className = search.matchCount ? 'search-text' : 'good';
     output.classList.add('open');
     $('#outputTitle').textContent = `Search: ${search.query}`;
     renderSearchResults(search);
+    if (activeSearchRunId) {
+      const actions = $('#outputActions');
+      appendEvidenceActions(actions, activeSearchRunId);
+      actions.classList.add('open');
+    }
   }
 
   treeList.addEventListener('click', (event) => {
@@ -933,7 +1014,7 @@
       enterSearchMode(chosen[0] === 'Search current directory' ? '{current}' : '.');
       return;
     }
-    if (category === 'Library') {
+    if (chosen[4]) {
       confirmRepositoryCommand(chosen);
       return;
     }

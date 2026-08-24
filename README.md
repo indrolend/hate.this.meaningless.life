@@ -164,6 +164,14 @@ Undo is a new forward operation: it runs the recorded inverse, captures its own 
 
 CLI parity is available through `node tools/hud/cli.mjs undo-plan <runId>` and `node tools/hud/cli.mjs undo <runId>`. Both derive the action from the runtime-owned immutable record; neither accepts a patch from the caller.
 
+## Runtime serialization and bounded evidence
+
+The local server permits only one typed operation at a time for its repository. Search, repository commands, and Undo share that boundary because each writes immutable run state even when the repository content is read-only. A concurrent request receives HTTP `409` with the active operation type, label, and start time; `GET /runtime` exposes the same factual BUSY or ready state. Undo performs both its final inverse-patch check and application inside this boundary, so another HUD operation cannot race between them.
+
+History can display raw stdout and stderr through `GET /history/:runId/evidence/stdout` and `/stderr`. The caller supplies a validated run identity and stream name, never a filesystem path. Responses are limited to 1–500 requested lines and at most the final 64 KiB, report the complete evidence size, and state whether the returned text is complete or a bounded tail. The original evidence file remains unchanged in the immutable run directory.
+
+The visual Library mechanically groups package scripts by their colon-separated namespace, including HUD, Android, Native, LG, and maintenance-related groups. Unnamespaced scripts and factual repository adapters remain in General and Tools. Typing in the picker searches across every group while an empty query retains the selected directory. These groups are derived from `currentState().commands`; they do not introduce a second command catalog.
+
 In the live renderer, submitting Search sends structured `query` and `scope` JSON rather than a command string. The runtime validates it, runs `rg` directly without a shell, records the evidence, and returns refreshed semantic state. Snapshot mode keeps the same Search controls but only copies the equivalent CLI command without claiming execution.
 
 `hud visual-state` remains a compatibility path for static hosting. It writes ignored `hud-state.js`, which contains machine-specific paths and transient Git state. Static mode can navigate that snapshot but cannot stream repository media. The browser command bar stages and copies exact commands; actual command execution remains owned by the CLI and Windows bridge.

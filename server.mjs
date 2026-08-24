@@ -1,4 +1,4 @@
-import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
+import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -84,6 +84,29 @@ function projectedPaths(directory, result = new Set()) {
   return result;
 }
 
+function evidenceTail(project, runId, stream, tail = 200) {
+  const record = runById(project, runId);
+  if (!record) throw Object.assign(new Error('Recorded run was not found.'), { statusCode: 404 });
+  const count = Number(tail);
+  if (!Number.isInteger(count) || count < 1 || count > 500) throw Object.assign(new Error('Evidence tail must be an integer from 1 to 500 lines.'), { statusCode: 400 });
+  const path = stream === 'stdout' ? record.stdoutPath : record.stderrPath;
+  if (!path || !existsSync(path)) throw Object.assign(new Error(`Recorded ${stream} evidence is unavailable.`), { statusCode: 404 });
+  const size = statSync(path).size;
+  const maximum = 64 * 1024;
+  const start = Math.max(0, size - maximum);
+  const buffer = Buffer.alloc(size - start);
+  const descriptor = openSync(path, 'r');
+  try { readSync(descriptor, buffer, 0, buffer.length, start); } finally { closeSync(descriptor); }
+  const decoded = buffer.toString('utf8');
+  const lines = decoded.split(/\r?\n/);
+  if (start > 0) lines.shift();
+  const selected = lines.slice(-count);
+  return {
+    runId: record.id, stream, size, complete: start === 0 && selected.length >= lines.length,
+    returnedBytes: Buffer.byteLength(selected.join('\n')), text: selected.join('\n'),
+  };
+}
+
 async function sourceExcerpt(project, requested, context = 2, runId = null) {
   const path = String(requested || '').replaceAll('\\', '/');
   const tree = await repositoryTree(project.root);
@@ -154,6 +177,17 @@ function sendFile(request, response, path, { cache = 'no-cache' } = {}) {
 }
 
 export function createHudServer(project) {
+  let activeOperation = null;
+  const runTypedOperation = async (type, label, action) => {
+    if (activeOperation) {
+      const error = Object.assign(new Error(`CommandHUD is busy with ${activeOperation.type}: ${activeOperation.label}`), { statusCode: 409 });
+      error.busy = activeOperation;
+      throw error;
+    }
+    activeOperation = { type, label, startedAt: new Date().toISOString() };
+    try { return await action(); }
+    finally { activeOperation = null; }
+  };
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
@@ -161,7 +195,7 @@ export function createHudServer(project) {
         validateOperationRequest(request);
         const operation = searchRequest(await jsonBody(request));
         let record;
-        try { record = await searchRepository(project, operation.query, operation.scope); }
+        try { record = await runTypedOperation('search', `${operation.query} in ${operation.scope}`, () => searchRepository(project, operation.query, operation.scope)); }
         catch (error) {
           if (/Search scope (?:is outside|does not exist)/.test(error.message)) error.statusCode = 400;
           throw error;
@@ -179,7 +213,7 @@ export function createHudServer(project) {
         validateOperationRequest(request);
         const operation = repositoryCommandRequest(await jsonBody(request));
         let record;
-        try { record = await runRepositoryCommand(project, operation.name); }
+        try { record = await runTypedOperation('repository-command', operation.name, () => runRepositoryCommand(project, operation.name)); }
         catch (error) {
           if (/^Unknown repository command:/.test(error.message)) error.statusCode = 400;
           throw error;
@@ -198,7 +232,7 @@ export function createHudServer(project) {
         validateOperationRequest(request);
         const operation = undoRequest(await jsonBody(request));
         let record;
-        try { record = await undoOperation(project, operation.runId); }
+        try { record = await runTypedOperation('undo', operation.runId, () => undoOperation(project, operation.runId)); }
         catch (error) {
           if (/^(?:Structured operation run was not found|Undo is )/.test(error.message)) error.statusCode = 409;
           throw error;
@@ -217,6 +251,10 @@ export function createHudServer(project) {
       }
       if (url.pathname === '/state' || url.pathname === '/visual-state') {
         json(response, 200, await currentState(project));
+        return;
+      }
+      if (url.pathname === '/runtime') {
+        json(response, 200, { busy: activeOperation });
         return;
       }
       if (url.pathname === '/tree') {
@@ -243,6 +281,11 @@ export function createHudServer(project) {
         const detail = await operationDetail(project, historyMatch[1]);
         if (!detail) throw Object.assign(new Error('Structured operation run was not found.'), { statusCode: 404 });
         json(response, 200, historyMatch[2] ? { runId: detail.runId, handoff: detail.handoff } : detail);
+        return;
+      }
+      const evidenceMatch = url.pathname.match(/^\/history\/(\d{14}-[0-9a-f]{4})\/evidence\/(stdout|stderr)$/i);
+      if (evidenceMatch) {
+        json(response, 200, evidenceTail(project, evidenceMatch[1], evidenceMatch[2].toLowerCase(), url.searchParams.get('tail') || 200));
         return;
       }
       if (url.pathname === '/handoff') {
@@ -279,7 +322,7 @@ export function createHudServer(project) {
       }
       sendFile(request, response, target);
     } catch (error) {
-      json(response, error.statusCode || 500, { error: error.message });
+      json(response, error.statusCode || 500, { error: error.message, ...(error.busy ? { busy: error.busy } : {}) });
     }
   });
 }
