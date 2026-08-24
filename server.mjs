@@ -1,0 +1,126 @@
+import { createReadStream, existsSync, statSync } from 'node:fs';
+import { createServer } from 'node:http';
+import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { currentState, repositoryTree } from './core.mjs';
+
+const staticRoot = join(dirname(fileURLToPath(import.meta.url)), 'visual-prototype');
+const contentTypes = {
+  '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8', '.css': 'text/css; charset=utf-8',
+  '.svg': 'image/svg+xml', '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg',
+  '.gif': 'image/gif', '.webp': 'image/webp', '.mp4': 'video/mp4', '.m4v': 'video/mp4',
+  '.mov': 'video/quicktime', '.webm': 'video/webm', '.mp3': 'audio/mpeg',
+  '.wav': 'audio/wav', '.m4a': 'audio/mp4', '.aac': 'audio/aac',
+  '.ogg': 'audio/ogg', '.flac': 'audio/flac',
+};
+
+function json(response, status, value) {
+  const body = `${JSON.stringify(value, null, 2)}\n`;
+  response.writeHead(status, {
+    'Content-Type': 'application/json; charset=utf-8',
+    'Content-Length': Buffer.byteLength(body),
+    'Cache-Control': 'no-store',
+  });
+  response.end(body);
+}
+
+function projectedPaths(directory, result = new Set()) {
+  for (const file of directory.files) result.add(file.path);
+  for (const child of directory.directories) projectedPaths(child, result);
+  return result;
+}
+
+function safeStaticPath(pathname) {
+  const relativePath = pathname === '/' ? 'index.html' : decodeURIComponent(pathname.slice(1));
+  const target = resolve(staticRoot, normalize(relativePath));
+  const inside = relative(staticRoot, target);
+  return inside === '' || (!inside.startsWith('..') && !resolve(inside).startsWith('..')) ? target : null;
+}
+
+function sendFile(request, response, path, { cache = 'no-cache' } = {}) {
+  if (!existsSync(path) || !statSync(path).isFile()) {
+    response.writeHead(404);
+    response.end('Not found');
+    return;
+  }
+  const size = statSync(path).size;
+  const type = contentTypes[extname(path).toLowerCase()] || 'application/octet-stream';
+  const range = request.headers.range?.match(/^bytes=(\d*)-(\d*)$/);
+  if (range) {
+    const start = range[1] ? Number(range[1]) : 0;
+    const end = range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
+    if (!Number.isInteger(start) || !Number.isInteger(end) || start < 0 || end < start || start >= size) {
+      response.writeHead(416, { 'Content-Range': `bytes ${'*'}/${size}` });
+      response.end();
+      return;
+    }
+    response.writeHead(206, {
+      'Accept-Ranges': 'bytes', 'Content-Range': `bytes ${start}-${end}/${size}`,
+      'Content-Length': end - start + 1, 'Content-Type': type, 'Cache-Control': cache,
+    });
+    createReadStream(path, { start, end }).pipe(response);
+    return;
+  }
+  response.writeHead(200, {
+    'Accept-Ranges': 'bytes', 'Content-Length': size,
+    'Content-Type': type, 'Cache-Control': cache,
+  });
+  if (request.method === 'HEAD') response.end();
+  else createReadStream(path).pipe(response);
+}
+
+export function createHudServer(project) {
+  return createServer(async (request, response) => {
+    try {
+      const url = new URL(request.url, 'http://localhost');
+      if (!['GET', 'HEAD'].includes(request.method)) {
+        json(response, 405, { error: 'CommandHUD serve is read-only.' });
+        return;
+      }
+      if (url.pathname === '/state' || url.pathname === '/visual-state') {
+        json(response, 200, await currentState(project));
+        return;
+      }
+      if (url.pathname === '/tree') {
+        json(response, 200, await repositoryTree(project.root));
+        return;
+      }
+      if (url.pathname === '/media') {
+        const requested = String(url.searchParams.get('path') || '').replaceAll('\\', '/');
+        const tree = await repositoryTree(project.root);
+        if (!requested || !projectedPaths(tree.root).has(requested)) {
+          json(response, 404, { error: 'Repository file is not in the current projection.' });
+          return;
+        }
+        const target = resolve(project.root, ...requested.split('/'));
+        const inside = relative(project.root, target);
+        if (!inside || inside.startsWith('..')) {
+          json(response, 403, { error: 'Repository path is outside the verified root.' });
+          return;
+        }
+        sendFile(request, response, target, { cache: 'no-store' });
+        return;
+      }
+      const target = safeStaticPath(url.pathname);
+      if (!target) {
+        response.writeHead(403);
+        response.end('Forbidden');
+        return;
+      }
+      sendFile(request, response, target);
+    } catch (error) {
+      json(response, 500, { error: error.message });
+    }
+  });
+}
+
+export async function startHudServer(project, { host = '127.0.0.1', port = 8765 } = {}) {
+  const server = createHudServer(project);
+  await new Promise((resolveListen, reject) => {
+    server.once('error', reject);
+    server.listen(port, host, resolveListen);
+  });
+  const address = server.address();
+  return { server, host, port: typeof address === 'object' ? address.port : port };
+}

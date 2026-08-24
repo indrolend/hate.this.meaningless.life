@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { homedir, platform } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -15,16 +15,21 @@ export function stateRoot(env = process.env) {
   return join(env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'commandhud');
 }
 
-async function exec(command, args, cwd) {
+async function exec(command, args, cwd, { trim = true } = {}) {
   try {
     const result = await execFileAsync(command, args, { cwd, windowsHide: true, encoding: 'utf8' });
-    return { ok: true, code: 0, stdout: result.stdout.trim(), stderr: result.stderr.trim() };
+    return {
+      ok: true,
+      code: 0,
+      stdout: trim ? result.stdout.trim() : result.stdout,
+      stderr: trim ? result.stderr.trim() : result.stderr,
+    };
   } catch (error) {
     return {
       ok: false,
       code: Number.isInteger(error.code) ? error.code : 1,
-      stdout: String(error.stdout || '').trim(),
-      stderr: String(error.stderr || error.message || '').trim(),
+      stdout: trim ? String(error.stdout || '').trim() : String(error.stdout || ''),
+      stderr: trim ? String(error.stderr || error.message || '').trim() : String(error.stderr || error.message || ''),
     };
   }
 }
@@ -93,7 +98,7 @@ export async function gitSnapshot(root) {
     exec('git', ['branch', '--show-current'], root),
     exec('git', ['rev-parse', 'HEAD'], root),
     exec('git', ['rev-parse', '--abbrev-ref', '--symbolic-full-name', '@{upstream}'], root),
-    exec('git', ['status', '--short'], root),
+    exec('git', ['status', '--short'], root, { trim: false }),
   ]);
   if (!head.ok) throw new Error(`Unable to read Git authority: ${head.stderr}`);
   let upstream = null;
@@ -114,6 +119,83 @@ export async function gitSnapshot(root) {
     branch: branch.stdout || '(detached)', head: head.stdout, upstream,
     upstreamRef: upstreamRef.ok ? upstreamRef.stdout : null,
     dirty: changedFiles.length > 0, changedFiles, ahead, behind,
+  };
+}
+
+function fileKind(path) {
+  const name = basename(path);
+  const extension = name.includes('.') ? name.slice(name.lastIndexOf('.') + 1).toLowerCase() : '';
+  return extension || 'file';
+}
+
+function changedPathMap(statusOutput) {
+  const result = new Map();
+  const records = statusOutput.split('\0');
+  for (let index = 0; index < records.length; index++) {
+    const record = records[index];
+    if (!record || record.length < 4) continue;
+    const status = record.slice(0, 2);
+    const path = record.slice(3).replaceAll('\\', '/');
+    result.set(path, status);
+    if (status.includes('R') || status.includes('C')) index++;
+  }
+  return result;
+}
+
+function directoryNode(name, path = '') {
+  return { name, path, directories: [], files: [] };
+}
+
+export async function repositoryTree(root) {
+  const [listed, status] = await Promise.all([
+    exec('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], root, { trim: false }),
+    exec('git', ['status', '--porcelain=v1', '-z', '--untracked-files=all'], root, { trim: false }),
+  ]);
+  if (!listed.ok) throw new Error(`Unable to enumerate repository tree: ${listed.stderr}`);
+  if (!status.ok) throw new Error(`Unable to read repository changes: ${status.stderr}`);
+
+  const paths = listed.stdout.split('\0').filter(Boolean)
+    .map((path) => path.replaceAll('\\', '/'))
+    .sort((a, b) => a.localeCompare(b, 'en'));
+  const changes = changedPathMap(status.stdout);
+  const rootNode = directoryNode(basename(root));
+  const directoryByPath = new Map([['', rootNode]]);
+
+  for (const path of paths) {
+    const parts = path.split('/');
+    const name = parts.pop();
+    let parentPath = '';
+    for (const part of parts) {
+      const childPath = parentPath ? `${parentPath}/${part}` : part;
+      if (!directoryByPath.has(childPath)) {
+        const child = directoryNode(part, childPath);
+        directoryByPath.get(parentPath).directories.push(child);
+        directoryByPath.set(childPath, child);
+      }
+      parentPath = childPath;
+    }
+    let size = null;
+    try { size = statSync(join(root, ...path.split('/'))).size; } catch {}
+    directoryByPath.get(parentPath).files.push({
+      name,
+      path,
+      kind: fileKind(path),
+      size,
+      gitStatus: changes.get(path) || null,
+    });
+  }
+
+  const sortNode = (node) => {
+    node.directories.sort((a, b) => a.name.localeCompare(b.name, 'en'));
+    node.files.sort((a, b) => a.name.localeCompare(b.name, 'en'));
+    node.directories.forEach(sortNode);
+  };
+  sortNode(rootNode);
+  return {
+    schemaVersion: SCHEMA_VERSION,
+    root: rootNode,
+    fileCount: paths.length,
+    directoryCount: directoryByPath.size - 1,
   };
 }
 
@@ -562,7 +644,7 @@ export function buildWorkflowPacket(value) {
 }
 
 export async function currentState(project, { cwd = process.cwd() } = {}) {
-  const git = await gitSnapshot(project.root);
+  const [git, repository] = await Promise.all([gitSnapshot(project.root), repositoryTree(project.root)]);
   const runs = listRuns(project, 100);
   const last = runs[0] || null;
   const workflowRun = runs.find((run) => run.workflow?.id) || null;
@@ -576,6 +658,7 @@ export async function currentState(project, { cwd = process.cwd() } = {}) {
     project: { id: project.identity.id, name: basename(project.root), root: project.root },
     cwd: { absolute: absoluteCwd, display: cwdInProject ? (relativeCwd || '.') : absoluteCwd },
     git,
+    repository,
     workflow: workflow ? {
       id: workflow.id,
       name: workflow.name,

@@ -1,0 +1,455 @@
+(async () => {
+  'use strict';
+
+  const $ = (selector) => document.querySelector(selector);
+  let liveState = false;
+  let state = window.commandHudRealState;
+  try {
+    const response = await fetch('/state', { cache: 'no-store' });
+    if (response.ok && response.headers.get('content-type')?.includes('application/json')) {
+      state = await response.json();
+      liveState = true;
+    }
+  } catch {}
+  const repository = state?.repository;
+  const app = $('#app');
+  const viewport = $('#viewport');
+  const world = $('#world');
+  const treeList = $('#treeList');
+  const focus = $('#focusPanel');
+  const input = $('#commandInput');
+  const picker = $('#picker');
+  const toolkit = $('#toolkitButton');
+  const output = $('#output');
+  const palette = ['#78d5e1', '#d4ec8e', '#7773ce', '#e1b87f', '#b45aac', '#7fa9ae'];
+  const filesByPath = new Map();
+  const directoriesByPath = new Map();
+  const layoutByPath = new Map();
+  const openDirectories = new Set(['']);
+  const pointers = new Map();
+  let currentDirectory = '';
+  let selected = null;
+  let camera = { x: 48, y: 48, z: 0.92 };
+  let gesture = null;
+  let category = 'Repository';
+
+  const commands = {
+    Repository: [
+      ['Current semantic state', 'Inspect the complete derived HUD snapshot.', 'node tools/hud/cli.mjs state --json', 'HUD'],
+      ['Repository tree', 'Inspect the Git-backed repository projection.', 'node tools/hud/cli.mjs tree', 'HUD'],
+      ['Refresh visual snapshot', 'Regenerate the ignored browser-state bridge.', 'node tools/hud/cli.mjs visual-state', 'HUD'],
+    ],
+    Git: [
+      ['Repository status', 'Show branch and concise worktree state.', 'git status --short --branch', 'repository'],
+      ['Review all changes', 'Show the current worktree patch.', 'git diff', 'worktree'],
+      ['Recent commits', 'Show recent checkpoints.', 'git log -8 --oneline --decorate', 'repository'],
+    ],
+    Test: [
+      ['HUD contract suite', 'Run the repository’s declared HUD verification.', 'npm run hud:test', 'tools/hud'],
+      ['Project test command', 'Run the test command declared by package.json.', 'npm test', 'repository'],
+    ],
+    Selection: [
+      ['Review selected changes', 'Show the selected file’s Git patch.', 'git diff -- {selection}', 'selection'],
+      ['Open selected file', 'Prepare the conventional editor command.', 'code --goto {selection}', 'selection'],
+    ],
+  };
+
+  function indexDirectory(directory) {
+    directoriesByPath.set(directory.path, directory);
+    directory.files.forEach((file) => filesByPath.set(file.path, file));
+    directory.directories.forEach(indexDirectory);
+  }
+
+  function formatSize(bytes) {
+    if (!Number.isFinite(bytes)) return 'unavailable';
+    if (bytes < 1024) return `${bytes} B`;
+    if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(bytes < 10240 ? 1 : 0)} KB`;
+    return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
+  }
+
+  function countChanged() {
+    return [...filesByPath.values()].filter((file) => file.gitStatus).length;
+  }
+
+  function descendants(directory) {
+    let count = directory.files.length;
+    for (const child of directory.directories) count += descendants(child);
+    return count;
+  }
+
+  function applyCamera() {
+    world.style.transform = `translate(${camera.x}px,${camera.y}px) scale(${camera.z})`;
+  }
+
+  function resetCamera() {
+    camera = { x: 48, y: 48, z: 0.92 };
+    applyCamera();
+  }
+
+  function setZoom(value, clientX = viewport.clientWidth / 2, clientY = viewport.clientHeight / 2) {
+    const old = camera.z;
+    const next = Math.max(0.45, Math.min(1.8, value));
+    camera.x = clientX - (clientX - camera.x) * (next / old);
+    camera.y = clientY - (clientY - camera.y) * (next / old);
+    camera.z = next;
+    applyCamera();
+  }
+
+  function renderMissingState() {
+    world.innerHTML = '<section class="focus open" style="position:absolute;left:40px;top:40px;transform:none;max-width:620px"><h2 class="focus-title">Repository snapshot required</h2><p class="focus-summary">Run <code>node tools/hud/cli.mjs visual-state</code> from the repository, then refresh this page.</p></section>';
+    $('#snapshotState').textContent = 'missing';
+    $('#snapshotState').className = 'warn';
+  }
+
+  function treeDirectory(directory, depth, fragment) {
+    if (directory.path) {
+      const row = document.createElement('button');
+      row.className = `tree-row${currentDirectory === directory.path ? ' selected' : ''}`;
+      row.dataset.directory = directory.path;
+      row.dataset.depth = String(depth);
+      row.style.paddingLeft = `${8 + depth * 15}px`;
+      row.innerHTML = `<span class="twisty">${openDirectories.has(directory.path) ? '▾' : '▸'}</span><span class="folder-dot"></span><span>${directory.name}</span>`;
+      fragment.appendChild(row);
+      if (!openDirectories.has(directory.path)) return;
+    }
+    for (const child of directory.directories) treeDirectory(child, depth + (directory.path ? 1 : 0), fragment);
+    for (const file of directory.files) {
+      const row = document.createElement('button');
+      row.className = `tree-row${selected?.path === file.path ? ' selected' : ''}`;
+      row.dataset.file = file.path;
+      row.dataset.depth = String(depth + (directory.path ? 1 : 0));
+      row.style.paddingLeft = `${23 + (depth + (directory.path ? 1 : 0)) * 15}px`;
+      row.innerHTML = `<span class="twisty"></span><span class="file-dot"></span><span>${file.name}</span>${file.gitStatus ? `<span class="changed">${file.gitStatus.trim() || 'M'}</span>` : ''}`;
+      fragment.appendChild(row);
+    }
+  }
+
+  function renderTree() {
+    const fragment = document.createDocumentFragment();
+    treeDirectory(repository.root, 0, fragment);
+    treeList.replaceChildren(fragment);
+  }
+
+  function directoryItems(directory) {
+    return [
+      ...directory.directories.map((value) => ({ type: 'directory', value })),
+      ...directory.files.map((value) => ({ type: 'file', value })),
+    ];
+  }
+
+  function renderMap() {
+    const directory = directoriesByPath.get(currentDirectory) || repository.root;
+    const items = directoryItems(directory);
+    const columns = Math.max(2, Math.min(5, Math.ceil(Math.sqrt(Math.max(items.length, 1) * 1.45))));
+    const cardWidth = 150;
+    const cardHeight = 66;
+    const gap = 22;
+    const regionWidth = Math.max(390, columns * (cardWidth + gap) + 34);
+    const rows = Math.max(1, Math.ceil(items.length / columns));
+    const regionHeight = Math.max(230, rows * (cardHeight + gap) + 88);
+    world.style.width = `${regionWidth + 160}px`;
+    world.style.height = `${regionHeight + 160}px`;
+    world.innerHTML = '';
+    layoutByPath.clear();
+
+    const region = document.createElement('section');
+    region.className = 'region';
+    region.style.cssText = `left:60px;top:60px;width:${regionWidth}px;height:${regionHeight}px;border-top-color:${palette[Math.abs(currentDirectory.length) % palette.length]}`;
+    const parentPath = currentDirectory.includes('/') ? currentDirectory.slice(0, currentDirectory.lastIndexOf('/')) : '';
+    region.innerHTML = `<span class="region-title">${directory.path || repository.root.name}</span><span class="region-meta">${directory.directories.length} directories · ${directory.files.length} files</span>`;
+    if (directory.path) {
+      const back = document.createElement('button');
+      back.className = 'node';
+      back.dataset.directory = parentPath;
+      back.style.cssText = 'left:18px;top:47px;width:70px;min-height:42px';
+      back.innerHTML = '<span class="node-name">← parent</span>';
+      region.appendChild(back);
+    }
+
+    items.forEach((item, index) => {
+      const x = 18 + (index % columns) * (cardWidth + gap);
+      const y = 106 + Math.floor(index / columns) * (cardHeight + gap);
+      const path = item.value.path;
+      layoutByPath.set(path, { x: 60 + x, y: 60 + y });
+      const button = document.createElement('button');
+      button.className = `node${selected?.path === path ? ' selected' : ''}`;
+      button.style.cssText = `left:${x}px;top:${y}px;width:${cardWidth}px`;
+      if (item.type === 'directory') {
+        button.dataset.directory = path;
+        button.innerHTML = `<span class="node-name">▰ ${item.value.name}</span><span class="node-kind">${item.value.directories.length}d · ${item.value.files.length}f · ${descendants(item.value)} total</span>`;
+      } else {
+        button.dataset.file = path;
+        button.innerHTML = `<span class="node-name">${item.value.name}</span><span class="node-kind">${item.value.kind} · ${formatSize(item.value.size)}</span>${item.value.gitStatus ? '<span class="mark"></span>' : ''}`;
+      }
+      region.appendChild(button);
+    });
+    world.appendChild(region);
+    applyCamera();
+  }
+
+  function enterDirectory(path, reset = true) {
+    if (!directoriesByPath.has(path)) return;
+    currentDirectory = path;
+    openDirectories.add(path);
+    let ancestor = path;
+    while (ancestor.includes('/')) {
+      ancestor = ancestor.slice(0, ancestor.lastIndexOf('/'));
+      openDirectories.add(ancestor);
+    }
+    selected = null;
+    $('#selection').textContent = path || 'repository';
+    closeFocus();
+    renderTree();
+    renderMap();
+    if (reset) resetCamera();
+  }
+
+  function openFile(path, fly = false) {
+    const file = filesByPath.get(path);
+    if (!file) return;
+    selected = file;
+    const parent = path.includes('/') ? path.slice(0, path.lastIndexOf('/')) : '';
+    if (currentDirectory !== parent) {
+      currentDirectory = parent;
+      openDirectories.add(parent);
+      renderMap();
+    }
+    renderTree();
+    renderMap();
+    $('#selection').textContent = file.name;
+    $('#focusTitle').textContent = file.name;
+    $('#focusPath').textContent = file.path;
+    $('#focusSummary').textContent = 'File information from the current Git and filesystem snapshot.';
+    renderMedia(file);
+    const status = file.gitStatus === '??' ? 'untracked' : file.gitStatus ? file.gitStatus : 'unchanged';
+    $('#focusFacts').innerHTML = `<div class="fact"><div class="fact-label">Type</div><div class="fact-value">${file.kind}</div></div><div class="fact"><div class="fact-label">Size</div><div class="fact-value">${formatSize(file.size)}</div></div><div class="fact"><div class="fact-label">Git</div><div class="fact-value">${status}</div></div>`;
+    focus.classList.add('open');
+    focus.setAttribute('aria-hidden', 'false');
+    if (fly) {
+      const position = layoutByPath.get(path);
+      if (position) {
+        camera.z = 1.08;
+        camera.x = viewport.clientWidth / 2 - (position.x + 75) * camera.z;
+        camera.y = viewport.clientHeight / 2 - (position.y + 34) * camera.z;
+        applyCamera();
+      }
+    }
+  }
+
+  function renderMedia(file) {
+    const preview = $('#mediaPreview');
+    const extension = file.kind.toLowerCase();
+    const video = new Set(['mp4', 'mov', 'm4v', 'webm', 'ogv']);
+    const audio = new Set(['mp3', 'wav', 'm4a', 'aac', 'ogg', 'flac']);
+    const image = new Set(['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg']);
+    preview.replaceChildren();
+    preview.classList.remove('open');
+    if (!video.has(extension) && !audio.has(extension) && !image.has(extension)) return;
+    preview.classList.add('open');
+    if (!liveState) {
+      preview.innerHTML = '<div class="media-note">Media preview requires the read-only <code>hud serve</code> adapter.</div>';
+      return;
+    }
+    const source = `/media?path=${encodeURIComponent(file.path)}`;
+    let element;
+    if (video.has(extension)) {
+      element = document.createElement('video');
+      element.controls = true;
+      element.preload = 'metadata';
+      element.playsInline = true;
+    } else if (audio.has(extension)) {
+      element = document.createElement('audio');
+      element.controls = true;
+      element.preload = 'metadata';
+    } else {
+      element = document.createElement('img');
+      element.alt = file.name;
+      element.loading = 'lazy';
+    }
+    element.src = source;
+    preview.appendChild(element);
+    const note = document.createElement('div');
+    note.className = 'media-note';
+    note.textContent = video.has(extension)
+      ? 'Playback depends on browser support for the codecs inside this file.'
+      : `${extension.toUpperCase()} repository preview`;
+    preview.appendChild(note);
+  }
+
+  function closeFocus() {
+    focus.classList.remove('open');
+    focus.setAttribute('aria-hidden', 'true');
+  }
+
+  function resolved(command) {
+    return command.replaceAll('{selection}', selected?.path || '[select a file]');
+  }
+
+  function filteredCommands() {
+    const query = $('#pickerSearch').value.toLowerCase();
+    return commands[category].filter((command) => command.join(' ').toLowerCase().includes(query));
+  }
+
+  function renderPicker() {
+    $('#categories').innerHTML = Object.keys(commands).map((name) => `<button type="button" class="category${name === category ? ' selected' : ''}" data-category="${name}">${name}</button>`).join('');
+    $('#pickerList').innerHTML = filteredCommands().map((command, index) => `<button type="button" class="command-item" data-command="${index}"><span class="command-name">${command[0]}</span><span class="scope">${command[3]}</span><span class="command-desc">${command[1]}</span><span class="command-code">${resolved(command[2])}</span></button>`).join('');
+  }
+
+  function togglePicker(force) {
+    const open = force ?? !picker.classList.contains('open');
+    picker.classList.toggle('open', open);
+    toolkit.setAttribute('aria-expanded', String(open));
+    if (open) {
+      renderPicker();
+      setTimeout(() => $('#pickerSearch').focus(), 20);
+    } else input.focus();
+  }
+
+  async function stageCommand(command) {
+    if (!command.trim()) return;
+    let copied = false;
+    try {
+      await navigator.clipboard.writeText(command);
+      copied = true;
+    } catch {}
+    output.classList.add('open');
+    $('#outputTitle').textContent = 'Exact command';
+    $('#outputText').textContent = `$ ${command}\n\n${copied ? 'Copied to the clipboard.' : 'Ready to copy.'}\nThis static browser client does not execute host shell commands.`;
+  }
+
+  if (!repository?.root) {
+    renderMissingState();
+    return;
+  }
+
+  indexDirectory(repository.root);
+  $('.brand').textContent = state.project.name;
+  $('.branch').textContent = state.git.branch;
+  $('#branchValue').textContent = state.git.branch;
+  $('#fileCount').textContent = String(repository.fileCount);
+  $('#changeCount').textContent = String(countChanged());
+  $('#changeCount').className = countChanged() ? 'warn' : 'good';
+  $('#snapshotState').textContent = state.git.head.slice(0, 7);
+  $('#snapshotState').className = state.git.dirty ? 'warn' : 'good';
+
+  treeList.addEventListener('click', (event) => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    if (button.dataset.directory !== undefined) {
+      const path = button.dataset.directory;
+      if (openDirectories.has(path)) openDirectories.delete(path);
+      else openDirectories.add(path);
+      enterDirectory(path);
+    } else if (button.dataset.file) openFile(button.dataset.file, true);
+  });
+
+  world.addEventListener('click', (event) => {
+    const button = event.target.closest('button');
+    if (!button) return;
+    if (button.dataset.directory !== undefined) enterDirectory(button.dataset.directory);
+    else if (button.dataset.file) openFile(button.dataset.file);
+  });
+
+  viewport.addEventListener('pointerdown', (event) => {
+    if (event.target.closest('button') || event.target.closest('.focus')) return;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    viewport.setPointerCapture(event.pointerId);
+    if (pointers.size === 1) gesture = { kind: 'pan', x: event.clientX, y: event.clientY, camera: { ...camera }, moved: false };
+    if (pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      gesture = { kind: 'pinch', distance: Math.hypot(a.x - b.x, a.y - b.y), zoom: camera.z };
+    }
+    viewport.classList.add('dragging');
+  });
+  viewport.addEventListener('pointermove', (event) => {
+    if (!pointers.has(event.pointerId)) return;
+    pointers.set(event.pointerId, { x: event.clientX, y: event.clientY });
+    if (gesture?.kind === 'pan' && pointers.size === 1) {
+      const dx = event.clientX - gesture.x;
+      const dy = event.clientY - gesture.y;
+      gesture.moved ||= Math.hypot(dx, dy) > 4;
+      camera.x = gesture.camera.x + dx;
+      camera.y = gesture.camera.y + dy;
+      applyCamera();
+    } else if (gesture?.kind === 'pinch' && pointers.size === 2) {
+      const [a, b] = [...pointers.values()];
+      setZoom(gesture.zoom * Math.hypot(a.x - b.x, a.y - b.y) / gesture.distance, (a.x + b.x) / 2, (a.y + b.y) / 2);
+    }
+  });
+  const finishPointer = (event) => {
+    const wasClick = gesture?.kind === 'pan' && !gesture.moved;
+    pointers.delete(event.pointerId);
+    if (!pointers.size) {
+      viewport.classList.remove('dragging');
+      gesture = null;
+      if (wasClick) closeFocus();
+    }
+  };
+  viewport.addEventListener('pointerup', finishPointer);
+  viewport.addEventListener('pointercancel', finishPointer);
+  viewport.addEventListener('wheel', (event) => {
+    event.preventDefault();
+    setZoom(camera.z * (event.deltaY > 0 ? 0.9 : 1.1), event.offsetX, event.offsetY);
+  }, { passive: false });
+
+  $('#treeToggle').addEventListener('click', () => {
+    const closed = app.classList.toggle('tree-closed');
+    $('#treeToggle').setAttribute('aria-expanded', String(!closed));
+  });
+  $('#refreshState').addEventListener('click', () => window.location.reload());
+  $('#zoomIn').onclick = () => setZoom(camera.z * 1.15);
+  $('#zoomOut').onclick = () => setZoom(camera.z * 0.87);
+  $('#zoomReset').onclick = resetCamera;
+  $('#focusClose').onclick = closeFocus;
+  $('.actions').onclick = (event) => {
+    if (!event.target.dataset.action || !selected) return;
+    input.value = event.target.dataset.action === 'changes' ? `git diff -- ${selected.path}` : `code --goto ${selected.path}`;
+    closeFocus();
+    input.focus();
+  };
+  toolkit.onclick = () => togglePicker();
+  $('#categories').onclick = (event) => {
+    if (!event.target.dataset.category) return;
+    category = event.target.dataset.category;
+    renderPicker();
+  };
+  $('#pickerSearch').oninput = renderPicker;
+  $('#pickerList').onclick = (event) => {
+    const button = event.target.closest('[data-command]');
+    if (!button) return;
+    input.value = resolved(filteredCommands()[Number(button.dataset.command)][2]);
+    togglePicker(false);
+  };
+  $('#terminal').onsubmit = (event) => {
+    event.preventDefault();
+    togglePicker(false);
+    stageCommand(input.value);
+  };
+  $('#outputClose').onclick = () => output.classList.remove('open');
+  window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') {
+      if (picker.classList.contains('open')) togglePicker(false);
+      else if (output.classList.contains('open')) output.classList.remove('open');
+      else closeFocus();
+    }
+    if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'k') {
+      event.preventDefault();
+      togglePicker();
+    }
+  });
+
+  renderTree();
+  renderMap();
+  renderPicker();
+  if (window.innerWidth <= 640) {
+    app.classList.add('tree-closed');
+    $('#treeToggle').setAttribute('aria-expanded', 'false');
+  }
+  window.commandHudDemo = {
+    enterDirectory,
+    openFile,
+    closeFocus,
+    togglePicker,
+    getState: () => ({ currentDirectory, selected: selected?.path || null, camera: { ...camera } }),
+  };
+})();

@@ -1,11 +1,12 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
-import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, discoverCommands, discoverTools, runCommand, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { readFileSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 function parse(argv) {
   const args = [...argv];
-  const options = { copy: false, quiet: false, root: null, objective: null, request: null, requestB64: null, workflowId: null, workflowName: null, stage: null, stageIndex: null, stageCount: null, json: false };
+  const options = { copy: false, quiet: false, root: null, objective: null, request: null, requestB64: null, workflowId: null, workflowName: null, stage: null, stageIndex: null, stageCount: null, json: false, host: '127.0.0.1', port: 8765 };
   const command = args.shift() || 'context';
   const positionals = [];
   for (let index = 0; index < args.length; index++) {
@@ -14,6 +15,9 @@ function parse(argv) {
     if (value === '--copy' || value === '--copy-packet') options.copy = true;
     else if (value === '--quiet') options.quiet = true;
     else if (value === '--json') options.json = true;
+    else if (value === '--lan') options.host = '0.0.0.0';
+    else if (value === '--host') options.host = args[++index];
+    else if (value === '--port') options.port = Number(args[++index]);
     else if (value === '--root' || value === '--objective' || value === '--request') options[value.slice(2)] = args[++index];
     else if (value === '--request-b64') options.requestB64 = args[++index];
     else if (value === '--workflow-id') options.workflowId = args[++index];
@@ -106,6 +110,33 @@ async function main() {
       next: value.next ?? 'none',
       status: value.status.toUpperCase(),
     });
+    return;
+  }
+  if (command === 'tree') {
+    const value = await repositoryTree(project.root);
+    if (options.json) return console.log(JSON.stringify(value, null, 2));
+    printObject({ root: value.root.name, directories: value.directoryCount, files: value.fileCount });
+    for (const directory of value.root.directories) {
+      console.log(`${directory.path} ${directory.directories.length}d ${directory.files.length}f`);
+    }
+    return;
+  }
+  if (command === 'visual-state') {
+    const value = await currentState(project);
+    const target = join(project.root, 'tools', 'hud', 'visual-prototype', 'hud-state.js');
+    writeFileSync(target, `window.commandHudRealState = ${JSON.stringify(value, null, 2)};\n`);
+    console.log(`VISUAL_STATE=${target}`);
+    console.log(`FILES=${value.repository.fileCount}`);
+    console.log(`DIRECTORIES=${value.repository.directoryCount}`);
+    return;
+  }
+  if (command === 'serve') {
+    if (!Number.isInteger(options.port) || options.port < 0 || options.port > 65535) throw new Error('hud serve requires a valid --port.');
+    const { startHudServer } = await import('./server.mjs');
+    const running = await startHudServer(project, { host: options.host, port: options.port });
+    console.log(`HUD_URL=http://${running.host}:${running.port}/`);
+    console.log(`ROOT=${project.root}`);
+    console.log('MODE=READ_ONLY');
     return;
   }
   if (command === 'continue') {

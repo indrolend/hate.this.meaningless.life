@@ -99,26 +99,34 @@ The Windows bridge also accepts this compact input form:
 `hud state` and `hud state --json` render the same `currentState()` object. It is a derived snapshot, not another persisted authority. Current fields are:
 
 ```text
-project  cwd  git  workflow  last  next  status
+project  cwd  git  repository  workflow  last  next  status
 ```
 
 This is the boundary for quick-context text and future visual renderers. Add facts here only when an existing authoritative source can derive them and a real renderer needs them.
 
-## Visual language prototype
+## Repository map prototype
 
-Open `visual-prototype/index.html` directly in a browser. It is a standalone Canvas prototype with no dependencies or build step.
+The renderer consumes the same repository projection exposed by `hud state --json`. The projection is built from Git tracked files plus nonignored untracked files, with deterministic hierarchy, mechanical file metadata, and porcelain Git status where known.
 
-Demo commands:
+Inspect the projection without dumping every path:
 
 ```text
-test  change  commit  push  fail  workflow  reset
+node tools/hud/cli.mjs tree
 ```
 
-The prototype proves presentation and motion only. It does not execute real commands, watch the filesystem, or replace the core. Its next integration step is a thin adapter from `hud state --json` and semantic command events into the existing fake state/event model.
+Start the read-only live adapter and open the local page:
 
-The central repository is the interactive hero surface. Its particle transition adapts the proven `basicbrowserslim/js/spa` contract: rasterize current and target surfaces, sample visible pixels, explode through shallow projected depth, and reform with a spring overshoot. Pointer drag gives the hero a resisted pull and spring return; click, Enter, or Space reveals its evidence.
+```powershell
+node tools/hud/cli.mjs serve
+```
 
-An optional local `hud-state.js` can assign a `hud state --json` snapshot to `window.commandHudRealState`. The file is ignored because it contains machine-specific paths and transient Git state. The `real` command, or initial page load when that global exists, hydrates the same visual model without introducing another backend.
+Open `http://127.0.0.1:8765/`. The tree and map consume one projection. The map progressively displays the repository root, a selected directory, and that directory's immediate children. File focus displays only mechanically derived type, size, path, and Git state.
+
+The adapter binds to loopback by default and exposes only read operations: `/state`, `/tree`, `/visual-state`, static prototype assets, and projected repository media. It has no shell-execution endpoint. Use `hud serve --lan` only when explicitly testing from another device on the local network.
+
+File focus uses native browser controls to preview projected MP4, MOV, WebM, MP3, WAV, M4A, AAC, OGG, and FLAC files. Image formats are displayed directly. Media delivery supports byte ranges for seeking. Actual playback still depends on the codecs supported by the active browser; a `.mov` container is not proof that its internal codec can be decoded.
+
+`hud visual-state` remains a compatibility path for static hosting. It writes ignored `hud-state.js`, which contains machine-specific paths and transient Git state. Static mode can navigate that snapshot but cannot stream repository media. The browser command bar stages and copies exact commands; actual command execution remains owned by the CLI and Windows bridge.
 
 ## Windows CommandHUD bridge
 

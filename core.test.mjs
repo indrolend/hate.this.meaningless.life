@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, fetchUpdate, formatPacket, gitSnapshot, readProjectState, reduceOutput, repositoryCurrency, resolveProject, runCommand, setWorkingValue, workingValue, workflowView } from './core.mjs';
+import { buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, fetchUpdate, formatPacket, gitSnapshot, readProjectState, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runCommand, setWorkingValue, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -312,6 +312,7 @@ test('current semantic state derives renderer-neutral project, cwd, git, workflo
   assert.equal(value.project.id, 'indrolend/data');
   assert.equal(value.cwd.display.replaceAll('\\', '/'), 'tools/hud');
   assert.equal(value.git.dirty, false);
+  assert.ok(value.repository.root.files.some((file) => file.path === 'file.txt'));
   assert.equal(value.workflow.name, 'state contract');
   assert.equal(value.workflow.status, 'in_progress');
   assert.equal(value.last.stage, 'inspect');
@@ -347,6 +348,32 @@ test('repository currency is content-stable and ignores ignored output', async (
   mkdirSync(join(project.root, 'build'));
   writeFileSync(join(project.root, 'build', 'artifact.bin'), 'one');
   assert.deepEqual(await repositoryCurrency(project.root), ignoredBase);
+});
+
+test('repository tree projects real hierarchy, changes, and ignored-file boundaries deterministically', async () => {
+  const root = fixture();
+  mkdirSync(join(root, 'src', 'nested'), { recursive: true });
+  writeFileSync(join(root, 'src', 'zeta.js'), 'export default 1;\n');
+  writeFileSync(join(root, 'src', 'alpha.js'), 'export default 2;\n');
+  writeFileSync(join(root, 'src', 'nested', 'value.txt'), 'value\n');
+  writeFileSync(join(root, '.gitignore'), 'ignored/\n');
+  mkdirSync(join(root, 'ignored'));
+  writeFileSync(join(root, 'ignored', 'artifact.bin'), 'ignored');
+  execFileSync('git', ['add', '.gitignore', 'src'], { cwd: root });
+  execFileSync('git', ['commit', '-m', 'tree fixture'], { cwd: root });
+  writeFileSync(join(root, 'src', 'alpha.js'), 'changed\n');
+  writeFileSync(join(root, 'src', 'untracked.js'), 'untracked\n');
+
+  const first = await repositoryTree(root);
+  const second = await repositoryTree(root);
+  assert.deepEqual(second, first);
+  const src = first.root.directories.find((directory) => directory.path === 'src');
+  assert.ok(src);
+  assert.deepEqual(src.files.map((file) => file.name), ['alpha.js', 'untracked.js', 'zeta.js']);
+  assert.equal(src.directories[0].path, 'src/nested');
+  assert.equal(src.files.find((file) => file.name === 'alpha.js').gitStatus, ' M');
+  assert.equal(src.files.find((file) => file.name === 'untracked.js').gitStatus, '??');
+  assert.equal(first.root.directories.some((directory) => directory.name === 'ignored'), false);
 });
 
 test('evidence currency is current, stale, or unknown', () => {
