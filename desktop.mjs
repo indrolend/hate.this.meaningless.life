@@ -72,7 +72,7 @@ export async function startDesktopHud(project, {
     lock.release();
   };
   try {
-    running = await serverFactory(project, { host: '127.0.0.1', port: 0 });
+    running = await serverFactory(project, { host: '127.0.0.1', port: 0, terminal: true });
     const executable = browserPath || findDesktopBrowser();
     if (!executable) throw new Error('CommandHUD desktop requires Microsoft Edge or Google Chrome on Windows.');
     const url = `http://${running.host}:${running.port}/`;

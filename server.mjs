@@ -2,7 +2,7 @@ import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSy
 import { createServer } from 'node:http';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildOperationHandoff, classifyEvidence, currentState, lastRun, operationDetail, operationHistory, recoverInterruptedRuns, repositoryCurrency, repositoryTree, runById, runRepositoryCommand, searchRepository, undoOperation, undoPlan } from './core.mjs';
+import { buildOperationHandoff, classifyEvidence, currentState, discoverShells, lastRun, operationDetail, operationHistory, recoverInterruptedRuns, repositoryCurrency, repositoryTree, runById, runRepositoryCommand, runTerminalCommand, searchRepository, undoOperation, undoPlan } from './core.mjs';
 
 const staticRoot = join(dirname(fileURLToPath(import.meta.url)), 'visual-prototype');
 const contentTypes = {
@@ -54,6 +54,15 @@ function repositoryCommandRequest(value) {
   if (unknown.length) throw Object.assign(new Error(`Unsupported repository command fields: ${unknown.join(', ')}`), { statusCode: 400 });
   if (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 200) throw Object.assign(new Error('Repository command name must be 1-200 characters.'), { statusCode: 400 });
   return { name: value.name };
+}
+
+function terminalCommandRequest(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('Terminal request must be an object.'), { statusCode: 400 });
+  const unknown = Object.keys(value).filter((key) => !['command', 'shell'].includes(key));
+  if (unknown.length) throw Object.assign(new Error(`Unsupported terminal fields: ${unknown.join(', ')}`), { statusCode: 400 });
+  if (typeof value.command !== 'string' || !value.command.trim() || value.command.length > 32 * 1024) throw Object.assign(new Error('Terminal command must be 1-32768 characters.'), { statusCode: 400 });
+  if (typeof value.shell !== 'string' || !['powershell', 'bash', 'cmd'].includes(value.shell)) throw Object.assign(new Error('Terminal shell must be powershell, bash, or cmd.'), { statusCode: 400 });
+  return { command: value.command, shell: value.shell };
 }
 
 function undoRequest(value) {
@@ -186,9 +195,10 @@ function sendFile(request, response, path, { cache = 'no-cache' } = {}) {
   else createReadStream(path).pipe(response);
 }
 
-export function createHudServer(project) {
+export function createHudServer(project, { terminal = false } = {}) {
   let activeOperation = null;
   let activeExecution = null;
+  let terminalCwd = project.root;
   const runTypedOperation = async (type, label, action, { cancellable = false } = {}) => {
     if (activeOperation) {
       const error = Object.assign(new Error(`CommandHUD is busy with ${activeOperation.type}: ${activeOperation.label}`), { statusCode: 409 });
@@ -263,6 +273,26 @@ export function createHudServer(project) {
         });
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/operations/terminal') {
+        validateOperationRequest(request);
+        if (!terminal) throw Object.assign(new Error('Terminal execution is available only in the trusted desktop application.'), { statusCode: 403 });
+        const operation = terminalCommandRequest(await jsonBody(request));
+        const shells = await discoverShells(project.root);
+        if (!shells.find((entry) => entry.id === operation.shell)?.available) throw Object.assign(new Error(`Terminal shell is unavailable: ${operation.shell}`), { statusCode: 400 });
+        const record = await runTypedOperation(
+          'terminal-command', operation.command,
+          ({ signal, onStart }) => runTerminalCommand(project, operation.command, { shell: operation.shell, cwd: terminalCwd, signal, onStart }),
+          { cancellable: true },
+        );
+        if (record.operation?.cwdPersistence !== 'outside-repository') terminalCwd = record.operation.cwdAfter;
+        json(response, 200, {
+          runId: record.id, status: record.status, operation: record.operation,
+          presentation: record.presentation,
+          evidence: { stdout: record.stdoutPath, stderr: record.stderrPath },
+          state: await currentState(project, { cwd: terminalCwd }),
+        });
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/operations/undo') {
         validateOperationRequest(request);
         const operation = undoRequest(await jsonBody(request));
@@ -289,7 +319,12 @@ export function createHudServer(project) {
         return;
       }
       if (url.pathname === '/runtime') {
-        json(response, 200, { busy: activeOperation });
+        const shells = terminal ? await discoverShells(project.root) : [];
+        json(response, 200, {
+          busy: activeOperation,
+          capabilities: { terminal, shells },
+          terminal: terminal ? { cwd: terminalCwd, displayCwd: relative(project.root, terminalCwd).replaceAll('\\', '/') || '.' } : null,
+        });
         return;
       }
       const activeEvidenceMatch = url.pathname.match(/^\/runtime\/evidence\/(stdout|stderr)$/i);
@@ -371,7 +406,7 @@ export function createHudServer(project) {
   });
 }
 
-export async function startHudServer(project, { host = '127.0.0.1', port = 8765 } = {}) {
+export async function startHudServer(project, { host = '127.0.0.1', port = 8765, terminal = false } = {}) {
   const recovery = await recoverInterruptedRuns(project);
   if (recovery.corrupt.length) {
     const run = recovery.corrupt[0];
@@ -381,7 +416,7 @@ export async function startHudServer(project, { host = '127.0.0.1', port = 8765 
     const run = recovery.detached[0];
     throw new Error(`A detached CommandHUD process still appears active for run ${run.runId}. Refusing to start another operation runtime.`);
   }
-  const server = createHudServer(project);
+  const server = createHudServer(project, { terminal });
   await new Promise((resolveListen, reject) => {
     server.once('error', reject);
     server.listen(port, host, resolveListen);

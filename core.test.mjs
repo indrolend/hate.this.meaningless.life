@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, discoverCommands, fetchUpdate, formatPacket, gitSnapshot, operationDetail, operationHistory, parseSearchOutput, readProjectState, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
+import { buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, discoverCommands, discoverShells, fetchUpdate, formatPacket, gitSnapshot, operationDetail, operationHistory, parseSearchOutput, readProjectState, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -597,6 +597,38 @@ test('search result paths share repository projection identity at root scope', (
       { path: 'src/beta.txt', count: 1, lines: [7] },
     ],
   });
+});
+
+test('terminal commands preserve exact intent and working directory across available major shells', async () => {
+  const project = await fixtureProject();
+  mkdirSync(join(project.root, 'sub'));
+  const shells = await discoverShells(project.root);
+  assert.ok(shells.some((shell) => shell.available));
+  const cases = {
+    powershell: { command: "Set-Location sub; Write-Output 'PS_OK'", output: /PS_OK/ },
+    bash: { command: 'cd sub', output: /^$/ },
+    cmd: { command: 'cd sub && echo CMD_OK', output: /CMD_OK/ },
+  };
+  for (const shell of shells.filter((entry) => entry.available)) {
+    const example = cases[shell.id];
+    const record = await runTerminalCommand(project, example.command, { shell: shell.id });
+    assert.equal(record.status, 'pass', `${shell.id}: ${readFileSync(record.stderrPath, 'utf8')}`);
+    assert.equal(record.command, example.command);
+    assert.notEqual(record.transportCommand, record.command);
+    assert.equal(record.operation.shell, shell.id);
+    assert.equal(record.operation.cwdAfter, join(project.root, 'sub'), JSON.stringify(record.operation));
+    assert.equal(record.operation.cwdPersistence, 'updated');
+    assert.match(readFileSync(record.stdoutPath, 'utf8'), example.output);
+  }
+});
+
+test('terminal working directory cannot persist outside the verified repository', async () => {
+  const project = await fixtureProject();
+  const shell = (await discoverShells(project.root)).find((entry) => entry.available && entry.id === (process.platform === 'win32' ? 'powershell' : 'bash'));
+  const command = shell.id === 'powershell' ? 'Set-Location ..' : 'cd ..';
+  const record = await runTerminalCommand(project, command, { shell: shell.id });
+  assert.equal(record.operation.cwdPersistence, 'outside-repository');
+  assert.equal(record.operation.cwdAfter, project.root);
 });
 
 test('evidence currency is current, stale, or unknown', () => {

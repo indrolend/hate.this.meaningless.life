@@ -112,6 +112,25 @@
     const label = $('#runtimeState');
     label.textContent = value?.busy ? `busy · ${value.busy.type}` : liveState ? 'ready' : 'static';
     label.className = value?.busy ? 'warn' : 'good';
+    const terminalEnabled = Boolean(value?.capabilities?.terminal);
+    $('#terminal').classList.toggle('desktop-terminal', terminalEnabled);
+    if (terminalEnabled) {
+      const shellSelect = $('#terminalShell');
+      const selected = shellSelect.value;
+      shellSelect.replaceChildren(...value.capabilities.shells.filter((shell) => shell.available).map((shell) => {
+        const option = document.createElement('option');
+        option.value = shell.id;
+        option.textContent = shell.label;
+        return option;
+      }));
+      if ([...shellSelect.options].some((option) => option.value === selected)) shellSelect.value = selected;
+      else if ([...shellSelect.options].some((option) => option.value === 'powershell')) shellSelect.value = 'powershell';
+      $('#terminal .run').textContent = inputMode === 'search' ? 'Search' : 'Run';
+      if (value.terminal?.displayCwd) $('.prompt').textContent = `${value.terminal.displayCwd} $`;
+    } else {
+      $('#terminal .run').textContent = inputMode === 'search' && liveState ? 'Search' : 'Copy';
+      $('.prompt').textContent = '$';
+    }
   }
 
   async function refreshRuntime() {
@@ -457,12 +476,12 @@
   function exitSearchMode() {
     inputMode = 'terminal';
     $('#terminal').classList.remove('search-mode');
-    $('.prompt').textContent = '$';
+    $('.prompt').textContent = runtime?.terminal?.displayCwd ? `${runtime.terminal.displayCwd} $` : '$';
     input.value = '';
     input.placeholder = 'Enter or discover an exact command';
     input.setAttribute('aria-label', 'Terminal command');
     $('.run').disabled = false;
-    $('.run').textContent = 'Copy';
+    $('.run').textContent = runtime?.capabilities?.terminal ? 'Run' : 'Copy';
     input.focus();
   }
 
@@ -472,7 +491,7 @@
       : typedSearch(input.value);
     const searchIntent = inputMode === 'search' || /^\s*search(?:\s|$)/i.test(input.value);
     $('.run').disabled = searchIntent && !operation;
-    $('.run').textContent = searchIntent ? 'Search' : 'Copy';
+    $('.run').textContent = searchIntent ? 'Search' : runtime?.capabilities?.terminal ? 'Run' : 'Copy';
     if (!operation) {
       if (searchIntent) {
         output.classList.add('open');
@@ -869,7 +888,7 @@
     }
   }
 
-  async function monitorRepositoryCommand(control) {
+  async function monitorRepositoryCommand(control, expectedType = 'repository-command') {
     while (!control.done) {
       await new Promise((resolve) => setTimeout(resolve, 350));
       if (control.done) return;
@@ -879,7 +898,7 @@
         const value = await response.json();
         showRuntime(value);
         const active = value.busy;
-        if (!active?.runId || active.type !== 'repository-command') continue;
+        if (!active?.runId || active.type !== expectedType) continue;
         const evidenceResponse = await fetch(`/runtime/evidence/stdout?run=${encodeURIComponent(active.runId)}&tail=80`, { cache: 'no-store' });
         const evidence = evidenceResponse.ok ? await evidenceResponse.json() : null;
         if (control.done) return;
@@ -892,6 +911,41 @@
           actions.classList.add('open');
         }
       } catch {}
+    }
+  }
+
+  async function executeTerminalCommand(command) {
+    const shell = $('#terminalShell').value;
+    output.classList.add('open');
+    $('#outputTitle').textContent = `${shell} running`;
+    $('#outputText').textContent = `${command}\n\nWaiting for the local runtime…`;
+    $('#outputResults').replaceChildren();
+    $('#outputActions').replaceChildren();
+    showRuntime({ ...runtime, busy: { type: 'terminal-command' } });
+    const monitor = { done: false };
+    monitorRepositoryCommand(monitor, 'terminal-command');
+    try {
+      const response = await fetch('/operations/terminal', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ command, shell }),
+      });
+      monitor.done = true;
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || `Terminal command failed with HTTP ${response.status}.`);
+      state = result.state;
+      $('#outputTitle').textContent = `${result.operation.shellLabel} · ${result.status}`;
+      $('#outputText').textContent = `${result.operation.displayCommand}\n\n${result.operation.summary.join('; ') || `exit ${result.operation.exitCode}`}\n${(result.operation.durationMs / 1000).toFixed(1)}s\nWorking directory: ${result.operation.cwdAfter}\nRaw evidence: run:${result.runId}`;
+      const actions = $('#outputActions');
+      actions.replaceChildren(outputAction('Copy handoff', 'confirm', copyHandoff));
+      appendEvidenceActions(actions, result.runId);
+      actions.classList.add('open');
+      input.value = '';
+      await refreshRuntime();
+    } catch (error) {
+      monitor.done = true;
+      $('#outputTitle').textContent = 'Terminal command refused';
+      $('#outputText').textContent = `${command}\n\n${error.message}`;
+      await refreshRuntime();
     }
   }
 
@@ -1096,6 +1150,7 @@
       : typedSearch(input.value);
     if (liveState && operation) await executeSearch(operation);
     else if (!liveState && operation) await stageCommand(`node tools/hud/cli.mjs search ${JSON.stringify(operation.query)} ${operation.scope}`);
+    else if (runtime?.capabilities?.terminal && input.value.trim()) await executeTerminalCommand(input.value);
     else await stageCommand(input.value);
   };
   $('#outputClose').onclick = () => output.classList.remove('open');

@@ -500,9 +500,11 @@ export async function runCommand(project, tokens, {
   objective, stream = true, request = null, workflow = null,
   acceptedExitCodes = [0], operationReducer = null, shell = true, captureDelta = false,
   signal = null, onStart = null, onOutput = null, operationIdentity = null,
+  cwd = project.root, displayCommand = null,
 } = {}) {
   if (!tokens.length) throw new Error('hud run requires a command.');
-  const command = tokens.map((token) => /[\s"']/.test(token) ? JSON.stringify(token) : token).join(' ');
+  const transportCommand = tokens.map((token) => /[\s"']/.test(token) ? JSON.stringify(token) : token).join(' ');
+  const command = displayCommand || transportCommand;
   const [before, currencyBefore, treeBefore] = await Promise.all([
     gitSnapshot(project.root), repositoryCurrency(project.root), captureDelta ? worktreeTree(project.root) : null,
   ]);
@@ -522,8 +524,8 @@ export async function runCommand(project, tokens, {
   let forceTimer = null;
   try {
     child = shell
-      ? spawn(command, { cwd: project.root, shell: true, windowsHide: true, env: process.env })
-      : spawn(tokens[0], tokens.slice(1), { cwd: project.root, shell: false, windowsHide: true, env: process.env });
+      ? spawn(transportCommand, { cwd, shell: true, windowsHide: true, env: process.env })
+      : spawn(tokens[0], tokens.slice(1), { cwd, shell: false, windowsHide: true, env: process.env });
   } catch (error) {
     stdoutFile.end(); stderrFile.end();
     throw new Error(`Unable to spawn command: ${error.message}`);
@@ -541,7 +543,7 @@ export async function runCommand(project, tokens, {
   try {
     atomicWriteJson(inflightPath, {
       schemaVersion: SCHEMA_VERSION, id, project: project.identity.id, root: project.root,
-      request: request || null, command, argv: tokens, objective: objective || null,
+      request: request || null, command, transportCommand, argv: tokens, cwd, objective: objective || null,
       startedAt: started.toISOString(), pid: child.pid, captureDelta, treeBefore,
       gitBefore: before, currencyBefore, stdoutPath, stderrPath, operationIdentity,
     }, { exclusive: true });
@@ -585,7 +587,7 @@ export async function runCommand(project, tokens, {
   const record = {
     schemaVersion: SCHEMA_VERSION, id, project: project.identity.id, root: project.root,
     branch: before.branch, headBefore: before.head, headAfter: after.head, upstream: before.upstream,
-    request: request || null, command, argv: tokens, cwd: project.root, objective: objective || null,
+    request: request || null, command, transportCommand, argv: tokens, cwd, objective: objective || null,
     workflow: workflow ? {
       id: workflow.id || null,
       name: workflow.name || null,
@@ -674,7 +676,8 @@ export async function recoverInterruptedRuns(project) {
     const record = {
       schemaVersion: SCHEMA_VERSION, id, project: project.identity.id, root: project.root,
       branch: inflight.gitBefore.branch, headBefore: inflight.gitBefore.head, headAfter: after.head, upstream: inflight.gitBefore.upstream,
-      request: inflight.request, command: inflight.command, argv: inflight.argv, cwd: project.root, objective: inflight.objective,
+      request: inflight.request, command: inflight.command, transportCommand: inflight.transportCommand || inflight.command,
+      argv: inflight.argv, cwd: inflight.cwd || project.root, objective: inflight.objective,
       workflow: null, startedAt: inflight.startedAt, endedAt: ended.toISOString(),
       durationMs: Math.max(0, ended - new Date(inflight.startedAt)), exitCode: null, status: 'interrupted',
       dirtyBefore: inflight.gitBefore.dirty, dirtyAfter: after.dirty, changedFiles: after.changedFiles,
@@ -694,6 +697,13 @@ export async function recoverInterruptedRuns(project) {
       record.operation = {
         ...inflight.operationIdentity, command: inflight.command, exitCode: null,
         status: 'interrupted', durationMs: record.durationMs, summary: [...reduction.summary],
+      };
+    } else if (inflight.operationIdentity?.type === 'terminal-command') {
+      record.operation = {
+        ...inflight.operationIdentity, command: inflight.command, exitCode: null,
+        status: 'interrupted', durationMs: record.durationMs,
+        cwdAfter: inflight.cwd || project.root, cwdPersistence: 'unknown',
+        summary: [...reduction.summary],
       };
     }
     record.presentation = buildPresentation(record);
@@ -784,6 +794,105 @@ export async function runRepositoryCommand(project, name, { stream = false, sign
       summary: [...record.reduction.summary],
     }),
   });
+}
+
+const SHELL_DEFINITIONS = {
+  powershell: { label: 'PowerShell', executables: process.platform === 'win32' ? ['pwsh.exe', 'powershell.exe'] : ['pwsh'] },
+  bash: { label: 'Bash', executables: process.platform === 'win32' ? ['wsl.exe', 'bash.exe'] : ['bash'] },
+  cmd: { label: 'Command Prompt', executables: process.platform === 'win32' ? [process.env.ComSpec || 'cmd.exe'] : [] },
+};
+
+export async function discoverShells(root = process.cwd()) {
+  const shells = [];
+  for (const [id, definition] of Object.entries(SHELL_DEFINITIONS)) {
+    let executable = null;
+    for (const candidate of definition.executables) {
+      const probe = await exec(candidate, id === 'cmd' ? ['/d', '/c', 'ver'] : candidate.toLowerCase().endsWith('wsl.exe') ? ['--status'] : ['--version'], root);
+      if (probe.ok) { executable = candidate; break; }
+    }
+    shells.push({ id, label: definition.label, available: Boolean(executable), executable });
+  }
+  return shells;
+}
+
+function repositoryDirectory(root, requested) {
+  const target = resolve(requested || root);
+  const inside = relative(root, target);
+  if (isAbsolute(inside) || inside === '..' || inside.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)) {
+    throw new Error(`Terminal working directory is outside the verified repository: ${target}`);
+  }
+  if (!existsSync(target) || !statSync(target).isDirectory()) throw new Error(`Terminal working directory does not exist: ${target}`);
+  return target;
+}
+
+export async function runTerminalCommand(project, command, {
+  shell = process.platform === 'win32' ? 'powershell' : 'bash', cwd = project.root,
+  stream = false, signal = null, onStart = null, onOutput = null,
+} = {}) {
+  const text = String(command || '');
+  if (!text.trim()) throw new Error('Terminal command must not be empty.');
+  if (text.length > 32 * 1024) throw new Error('Terminal command exceeds 32 KiB.');
+  const selectedCwd = repositoryDirectory(project.root, cwd);
+  const available = await discoverShells(project.root);
+  const selected = available.find((entry) => entry.id === shell);
+  if (!selected) throw new Error(`Unsupported terminal shell: ${shell}`);
+  if (!selected.available) throw new Error(`Terminal shell is unavailable: ${shell}`);
+  const temporary = mkdtempSync(join(tmpdir(), 'commandhud-terminal-'));
+  const cwdPath = shell === 'bash' ? join(project.root, '.git', `.commandhud-cwd-${randomBytes(8).toString('hex')}.tmp`) : join(temporary, 'cwd.txt');
+  let tokens;
+  if (shell === 'powershell') {
+    const quotedCwdPath = cwdPath.replaceAll("'", "''");
+    const script = `& { ${text}\n}; $hudExit = if ($?) { 0 } elseif ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 1 }; (Get-Location).ProviderPath | Set-Content -LiteralPath '${quotedCwdPath}' -NoNewline -Encoding utf8; exit $hudExit`;
+    tokens = [selected.executable, '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
+  } else if (shell === 'bash') {
+    if (selected.executable.toLowerCase().endsWith('wsl.exe')) {
+      const start = relative(project.root, selectedCwd).replaceAll('\\', '/') || '.';
+      const script = `exec 3> '.git/${basename(cwdPath)}'\ncd '${start.replaceAll("'", "'\\''")}' || exit 1\n${text}\nhud_exit=$?\npwd -P >&3\nexit $hud_exit`;
+      tokens = [selected.executable, '--cd', project.root, 'bash', '--noprofile', '--norc', '-c', script];
+    } else {
+      const start = relative(project.root, selectedCwd).replaceAll('\\', '/') || '.';
+      const script = `exec 3> '.git/${basename(cwdPath)}'\ncd '${start.replaceAll("'", "'\\''")}' || exit 1\n${text}\nhud_exit=$?\npwd -W >&3\nexit $hud_exit`;
+      tokens = [selected.executable, '--noprofile', '--norc', '-c', script];
+    }
+  } else {
+    const quotedCwdPath = cwdPath.replaceAll('%', '%%').replaceAll('"', '""');
+    const scriptPath = join(temporary, 'commandhud.cmd');
+    writeFileSync(scriptPath, `@echo off\r\n${text}\r\nset "HUD_EXIT=%ERRORLEVEL%"\r\ncd>"${quotedCwdPath}"\r\nexit /b %HUD_EXIT%\r\n`, { flag: 'wx' });
+    tokens = [selected.executable, '/d', '/q', '/v:off', '/c', scriptPath];
+  }
+  try {
+    const record = await runCommand(project, tokens, {
+      request: `terminal ${shell}`,
+      objective: `Run terminal command with ${selected.label}`,
+      stream, shell: false, captureDelta: true, signal, onStart, onOutput,
+      cwd: selectedCwd, displayCommand: text,
+      operationIdentity: { type: 'terminal-command', shell, displayCommand: text, cwdBefore: selectedCwd },
+      operationReducer: ({ exitCode, record }) => {
+        let cwdAfter = selectedCwd;
+        let cwdPersistence = 'unchanged';
+        let reportedCwd = null;
+        if (existsSync(cwdPath)) {
+          reportedCwd = readFileSync(cwdPath, 'utf8').replace(/^\uFEFF/, '').trim();
+          if (process.platform === 'win32' && /^\/mnt\/[a-z](?:\/|$)/i.test(reportedCwd)) {
+            reportedCwd = `${reportedCwd[5].toUpperCase()}:\\${reportedCwd.slice(7).replaceAll('/', '\\')}`;
+          }
+          try { cwdAfter = repositoryDirectory(project.root, reportedCwd); cwdPersistence = cwdAfter === selectedCwd ? 'unchanged' : 'updated'; }
+          catch { cwdPersistence = 'outside-repository'; }
+        }
+        return {
+          type: 'terminal-command', shell, shellLabel: selected.label,
+          displayCommand: text, command: text, exitCode, status: record.status,
+          durationMs: record.durationMs, cwdBefore: selectedCwd, cwdAfter, cwdPersistence,
+          reportedCwd,
+          summary: [...record.reduction.summary],
+        };
+      },
+    });
+    return record;
+  } finally {
+    if (shell === 'bash') rmSync(cwdPath, { force: true });
+    rmSync(temporary, { recursive: true, force: true });
+  }
 }
 
 export async function undoPlan(project, runId) {

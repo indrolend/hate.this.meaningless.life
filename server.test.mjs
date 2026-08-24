@@ -65,6 +65,51 @@ test('HUD server refuses corrupt interrupted evidence', async () => {
   await assert.rejects(() => startHudServer(project, { port: 0 }), new RegExp(`Interrupted evidence is corrupt for run ${id}`));
 });
 
+test('terminal execution is desktop-only and persists repository-contained cwd', async (t) => {
+  const staticProject = await fixtureProject();
+  const restricted = await startHudServer(staticProject, { port: 0 });
+  t.after(() => restricted.server.close());
+  const restrictedBase = `http://127.0.0.1:${restricted.port}`;
+  const restrictedRuntime = await (await fetch(`${restrictedBase}/runtime`)).json();
+  assert.equal(restrictedRuntime.capabilities.terminal, false);
+  const refused = await fetch(`${restrictedBase}/operations/terminal`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ shell: 'powershell', command: 'echo no' }),
+  });
+  assert.equal(refused.status, 403);
+
+  const project = await fixtureProject();
+  const running = await startHudServer(project, { port: 0, terminal: true });
+  t.after(() => running.server.close());
+  const base = `http://127.0.0.1:${running.port}`;
+  const runtime = await (await fetch(`${base}/runtime`)).json();
+  assert.equal(runtime.capabilities.terminal, true);
+  const shell = runtime.capabilities.shells.find((entry) => entry.available && entry.id === (process.platform === 'win32' ? 'powershell' : 'bash'));
+  assert.ok(shell);
+  const changeDirectory = shell.id === 'powershell' ? 'Set-Location tools' : 'cd tools';
+  const first = await fetch(`${base}/operations/terminal`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ shell: shell.id, command: changeDirectory }),
+  });
+  assert.equal(first.status, 200);
+  assert.equal((await first.json()).operation.cwdPersistence, 'updated');
+  const after = await (await fetch(`${base}/runtime`)).json();
+  assert.equal(after.terminal.displayCwd, 'tools');
+  const exact = 'echo HUD_TERMINAL_OK';
+  const second = await fetch(`${base}/operations/terminal`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ shell: shell.id, command: exact }),
+  });
+  const result = await second.json();
+  assert.equal(second.status, 200);
+  assert.equal(result.operation.displayCommand, exact);
+  assert.equal(result.operation.cwdBefore, join(project.root, 'tools'));
+  assert.equal((await fetch(`${base}/operations/terminal`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ shell: shell.id, command: exact, cwd: '..' }),
+  })).status, 400);
+});
+
 test('HUD server serializes typed operations and exposes bounded evidence, live reads, and media', async (t) => {
   const project = await fixtureProject();
   await searchRepository(project, 'RIFF', 'media');
