@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, discoverCommands, fetchUpdate, formatPacket, gitSnapshot, parseSearchOutput, readProjectState, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runCommand, runRepositoryCommand, searchRepository, setWorkingValue, workingValue, workflowView } from './core.mjs';
+import { buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, discoverCommands, fetchUpdate, formatPacket, gitSnapshot, operationDetail, operationHistory, parseSearchOutput, readProjectState, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, searchRepository, setWorkingValue, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -54,6 +54,22 @@ test('repository command execution resolves a current discovered identity and re
   assert.match(readFileSync(record.stdoutPath, 'utf8'), /100% tests passed/);
   assert.equal(readFileSync(record.stderrPath, 'utf8'), '');
   assert.match(buildOperationHandoff(project, record), new RegExp(`RAW run:${record.id}`));
+  assert.deepEqual(await operationHistory(project), [{
+    runId: record.id, type: 'repository-command', name: 'native-tests', query: null, scope: '.',
+    command: 'node tools/run-native-tests.mjs', status: 'pass', durationMs: record.durationMs,
+    startedAt: record.startedAt, evidence: 'CURRENT', result: '3/3 CTest',
+  }]);
+  const detail = await operationDetail(project, record.id);
+  assert.equal(detail.runId, record.id);
+  assert.deepEqual(detail.operation, record.operation);
+  assert.equal(detail.evidence, 'CURRENT');
+  assert.equal(detail.raw.stdout, record.stdoutPath);
+  assert.match(detail.handoff, /OPERATION REPOSITORY-COMMAND/);
+  assert.equal(runById(project, '../run.json'), null);
+
+  writeFileSync(join(root, 'file.txt'), 'history is now stale\n');
+  assert.equal((await operationHistory(project))[0].evidence, 'STALE');
+  writeFileSync(join(root, 'file.txt'), 'initial\n');
 
   await assert.rejects(() => runRepositoryCommand(project, 'not-declared'), /Unknown repository command/);
   assert.equal(readProjectState(project).lastRunId, record.id);

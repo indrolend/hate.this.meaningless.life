@@ -809,6 +809,51 @@ export function listRuns(project, limit = 10) {
   return ids.slice(0, limit).map((id) => readJson(join(root, id, 'run.json'))).filter(Boolean);
 }
 
+export function runById(project, id) {
+  const value = String(id || '');
+  if (!/^\d{14}-[0-9a-f]{4}$/i.test(value)) return null;
+  return readJson(join(project.store, 'runs', project.key, value, 'run.json')) || null;
+}
+
+export async function operationHistory(project, limit = 25) {
+  const bounded = Math.max(1, Math.min(100, Number(limit) || 25));
+  const currency = await repositoryCurrency(project.root);
+  return listRuns(project, 100).filter((record) => record.operation).slice(0, bounded).map((record) => ({
+    runId: record.id,
+    type: record.operation.type,
+    name: record.operation.name || null,
+    query: record.operation.query || null,
+    scope: record.operation.scope || '.',
+    command: record.operation.command,
+    status: record.status,
+    durationMs: record.durationMs,
+    startedAt: record.startedAt,
+    evidence: classifyEvidence(record.currencyAfter, currency),
+    result: record.operation.type === 'search'
+      ? `${record.operation.matchCount} matches / ${record.operation.fileCount} files`
+      : record.operation.summary?.join('; ') || `exit ${record.exitCode}`,
+  }));
+}
+
+export async function operationDetail(project, id) {
+  const record = runById(project, id);
+  if (!record?.operation) return null;
+  const currency = await repositoryCurrency(project.root);
+  return {
+    runId: record.id,
+    operation: record.operation,
+    status: record.status,
+    durationMs: record.durationMs,
+    startedAt: record.startedAt,
+    evidence: classifyEvidence(record.currencyAfter, currency),
+    presentation: record.presentation,
+    gitBefore: record.gitBefore,
+    gitAfter: record.gitAfter,
+    raw: { stdout: record.stdoutPath, stderr: record.stderrPath },
+    handoff: buildOperationHandoff(project, record),
+  };
+}
+
 export async function fetchUpdate(project, fetchImpl = fetch) {
   const manifestUrl = project.identity.manifest;
   const response = await fetchImpl(manifestUrl, { headers: { 'Cache-Control': 'no-cache' }, signal: AbortSignal.timeout(8000) });

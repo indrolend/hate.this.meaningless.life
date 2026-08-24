@@ -2,7 +2,7 @@ import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildOperationHandoff, classifyEvidence, currentState, lastRun, repositoryCurrency, repositoryTree, runRepositoryCommand, searchRepository } from './core.mjs';
+import { buildOperationHandoff, classifyEvidence, currentState, lastRun, operationDetail, operationHistory, repositoryCurrency, repositoryTree, runById, runRepositoryCommand, searchRepository } from './core.mjs';
 
 const staticRoot = join(dirname(fileURLToPath(import.meta.url)), 'visual-prototype');
 const contentTypes = {
@@ -76,11 +76,11 @@ function projectedPaths(directory, result = new Set()) {
   return result;
 }
 
-async function sourceExcerpt(project, requested, context = 2) {
+async function sourceExcerpt(project, requested, context = 2, runId = null) {
   const path = String(requested || '').replaceAll('\\', '/');
   const tree = await repositoryTree(project.root);
   if (!path || !projectedPaths(tree.root).has(path)) throw Object.assign(new Error('Source file is not in the current repository projection.'), { statusCode: 404 });
-  const record = lastRun(project);
+  const record = runId ? runById(project, runId) : lastRun(project);
   const match = record?.operation?.type === 'search' ? record.operation.files.find((file) => file.path === path) : null;
   if (!match) throw Object.assign(new Error('Source excerpts require a matching file from the latest Search operation.'), { statusCode: 409 });
   const radius = Number(context);
@@ -198,6 +198,19 @@ export function createHudServer(project) {
         json(response, 200, await repositoryTree(project.root));
         return;
       }
+      if (url.pathname === '/history') {
+        const limit = Number(url.searchParams.get('limit') || 25);
+        if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw Object.assign(new Error('History limit must be an integer from 1 to 100.'), { statusCode: 400 });
+        json(response, 200, { history: await operationHistory(project, limit) });
+        return;
+      }
+      const historyMatch = url.pathname.match(/^\/history\/(\d{14}-[0-9a-f]{4})(\/handoff)?$/i);
+      if (historyMatch) {
+        const detail = await operationDetail(project, historyMatch[1]);
+        if (!detail) throw Object.assign(new Error('Structured operation run was not found.'), { statusCode: 404 });
+        json(response, 200, historyMatch[2] ? { runId: detail.runId, handoff: detail.handoff } : detail);
+        return;
+      }
       if (url.pathname === '/handoff') {
         const record = lastRun(project);
         if (!record?.operation) throw Object.assign(new Error('No structured operation is available to hand off.'), { statusCode: 404 });
@@ -205,7 +218,7 @@ export function createHudServer(project) {
         return;
       }
       if (url.pathname === '/source') {
-        json(response, 200, await sourceExcerpt(project, url.searchParams.get('path'), url.searchParams.get('context') ?? 2));
+        json(response, 200, await sourceExcerpt(project, url.searchParams.get('path'), url.searchParams.get('context') ?? 2, url.searchParams.get('run')));
         return;
       }
       if (url.pathname === '/media') {

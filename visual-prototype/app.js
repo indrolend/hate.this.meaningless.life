@@ -12,9 +12,10 @@
     }
   } catch {}
   const repository = state?.repository;
-  const search = state?.lastOperation?.type === 'search' ? state.lastOperation : null;
+  let search = state?.lastOperation?.type === 'search' ? state.lastOperation : null;
   const searchFiles = new Map((search?.files || []).map((file) => [file.path, file]));
   const searchOrder = (search?.files || []).map((file) => file.path);
+  let activeSearchRunId = search ? state?.last?.runId : null;
   const app = $('#app');
   const viewport = $('#viewport');
   const world = $('#world');
@@ -318,7 +319,8 @@
     }
     preview.innerHTML = '<div class="media-note">Loading factual source context…</div>';
     try {
-      const response = await fetch(`/source?path=${encodeURIComponent(file.path)}&context=2`, { cache: 'no-store' });
+      const run = activeSearchRunId ? `&run=${encodeURIComponent(activeSearchRunId)}` : '';
+      const response = await fetch(`/source?path=${encodeURIComponent(file.path)}&context=2${run}`, { cache: 'no-store' });
       const value = await response.json();
       if (!response.ok) throw new Error(value.error || `Source request failed with HTTP ${response.status}.`);
       if (selected?.path !== file.path) return;
@@ -532,8 +534,8 @@
     }
   }
 
-  function renderSearchResults(value) {
-    $('#outputText').textContent = `${value.command}\n\n${value.matchCount} matches in ${value.fileCount} files\n\nRaw evidence: run:${state.last?.runId || 'unknown'}`;
+  function renderSearchResults(value, runId = activeSearchRunId || state.last?.runId) {
+    $('#outputText').textContent = `${value.command}\n\n${value.matchCount} matches in ${value.fileCount} files\n\nRaw evidence: run:${runId || 'unknown'}`;
     const results = $('#outputResults');
     results.replaceChildren();
     value.files.forEach((file) => {
@@ -553,6 +555,88 @@
       };
       results.appendChild(button);
     });
+  }
+
+  async function copyRecordedHandoff(detail) {
+    let copied = false;
+    try { await navigator.clipboard.writeText(detail.handoff); copied = true; } catch {}
+    $('#outputText').textContent += copied ? '\n\nHandoff copied.' : '\n\nHandoff is ready but clipboard access was unavailable.';
+  }
+
+  function activateRecordedSearch(detail) {
+    search = detail.operation;
+    activeSearchRunId = detail.runId;
+    searchFiles.clear();
+    searchOrder.splice(0);
+    for (const file of search.files || []) {
+      searchFiles.set(file.path, file);
+      searchOrder.push(file.path);
+    }
+    closeFocus();
+    if (search.scope && search.scope !== '.' && directoriesByPath.has(search.scope)) enterDirectory(search.scope);
+    else { currentDirectory = ''; renderTree(); renderMap(); }
+    $('#searchState').textContent = `${search.matchCount} / ${search.fileCount}`;
+    $('#searchState').className = search.matchCount ? 'search-text' : 'good';
+    output.classList.add('open');
+    $('#outputTitle').textContent = `Recorded Search · ${detail.evidence}`;
+    renderSearchResults(search, detail.runId);
+    const actions = $('#outputActions');
+    actions.replaceChildren(outputAction('Copy handoff', 'confirm', () => copyRecordedHandoff(detail)));
+    actions.classList.add('open');
+  }
+
+  async function showHistoryDetail(runId) {
+    $('#outputTitle').textContent = 'Loading recorded operation';
+    $('#outputText').textContent = `run:${runId}`;
+    $('#outputResults').replaceChildren();
+    try {
+      const response = await fetch(`/history/${encodeURIComponent(runId)}`, { cache: 'no-store' });
+      const detail = await response.json();
+      if (!response.ok) throw new Error(detail.error || `History request failed with HTTP ${response.status}.`);
+      if (detail.operation.type === 'search') return activateRecordedSearch(detail);
+      $('#outputTitle').textContent = `${detail.operation.name} · ${detail.evidence}`;
+      const summary = detail.operation.summary?.join('; ') || `exit ${detail.operation.exitCode}`;
+      $('#outputText').textContent = `${detail.operation.command}\n\n${detail.status.toUpperCase()} · ${summary}\n${(detail.durationMs / 1000).toFixed(1)}s\nRaw evidence: run:${detail.runId}`;
+      const actions = $('#outputActions');
+      actions.replaceChildren(outputAction('Copy handoff', 'confirm', () => copyRecordedHandoff(detail)));
+      actions.classList.add('open');
+    } catch (error) {
+      $('#outputTitle').textContent = 'History unavailable';
+      $('#outputText').textContent = error.message;
+    }
+  }
+
+  async function showHistory() {
+    output.classList.add('open');
+    $('#outputTitle').textContent = 'Operation history';
+    $('#outputText').textContent = liveState ? 'Loading immutable operation records…' : 'History requires the live local HUD runtime.';
+    $('#outputResults').replaceChildren();
+    $('#outputActions').replaceChildren();
+    $('#outputActions').classList.remove('open');
+    if (!liveState) return;
+    try {
+      const response = await fetch('/history?limit=25', { cache: 'no-store' });
+      const value = await response.json();
+      if (!response.ok) throw new Error(value.error || `History request failed with HTTP ${response.status}.`);
+      $('#outputText').textContent = value.history.length ? `${value.history.length} recorded operations` : 'No structured operations have been recorded.';
+      for (const item of value.history) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'output-result';
+        const label = document.createElement('span');
+        label.textContent = item.type === 'search' ? `Search ${item.query}` : item.name;
+        const status = document.createElement('strong');
+        status.textContent = item.status.toUpperCase();
+        const result = document.createElement('small');
+        result.textContent = `${item.result} · ${item.evidence} · ${(item.durationMs / 1000).toFixed(1)}s`;
+        button.append(label, status, result);
+        button.onclick = () => showHistoryDetail(item.runId);
+        $('#outputResults').appendChild(button);
+      }
+    } catch (error) {
+      $('#outputTitle').textContent = 'History unavailable';
+      $('#outputText').textContent = error.message;
+    }
   }
 
   async function executeSearch(operation) {
@@ -730,6 +814,7 @@
     $('#treeToggle').setAttribute('aria-expanded', String(!closed));
   });
   $('#refreshState').addEventListener('click', () => window.location.reload());
+  $('#historyButton').addEventListener('click', showHistory);
   $('#zoomIn').onclick = () => setZoom(camera.z * 1.15);
   $('#zoomOut').onclick = () => setZoom(camera.z * 0.87);
   $('#zoomReset').onclick = resetCamera;

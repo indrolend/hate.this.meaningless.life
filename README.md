@@ -150,6 +150,12 @@ The toolkit's Library directory is derived from `discoverCommands()` in the same
 
 In live mode, a Library entry can be run only after an explicit confirmation that shows the resolved command and warns that repository commands can execute arbitrary local code. The renderer submits the stable discovered identity, such as `npm:hud:test`, rather than executable text. The runtime rediscovers that identity, executes its runtime-owned argument vector without a shell, and records the resolved command, status, duration, reduction, Git state, stdout, and stderr through the existing immutable run system. The same operation is available directly as `node tools/hud/cli.mjs repository-command npm:hud:test`. Static mode remains staging-only.
 
+## Immutable operation history
+
+The live History control projects existing structured run records; it does not create a history database. `GET /history` returns bounded summaries with operation identity, factual result, duration, status, and `CURRENT`, `STALE`, or `UNKNOWN` evidence currency. `GET /history/:runId` returns the existing operation, presentation, Git snapshots, raw evidence paths, and compact handoff. Run IDs are validated before reading the project-specific immutable run directory.
+
+Selecting a recorded Search reconstructs its saved matches and repository highlights without executing `rg` again. Source excerpts accept that validated Search run identity and retain the same projected-file, recorded-match, size, binary, and context limits as the latest-Search view. Selecting a recorded repository command shows its saved reduction and evidence reference; it does not infer test ownership or touched files.
+
 In the live renderer, submitting Search sends structured `query` and `scope` JSON rather than a command string. The runtime validates it, runs `rg` directly without a shell, records the evidence, and returns refreshed semantic state. Snapshot mode keeps the same Search controls but only copies the equivalent CLI command without claiming execution.
 
 `hud visual-state` remains a compatibility path for static hosting. It writes ignored `hud-state.js`, which contains machine-specific paths and transient Git state. Static mode can navigate that snapshot but cannot stream repository media. The browser command bar stages and copies exact commands; actual command execution remains owned by the CLI and Windows bridge.

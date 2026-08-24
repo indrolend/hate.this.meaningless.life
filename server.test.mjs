@@ -167,4 +167,24 @@ test('HUD server exposes live reads, typed operations, and byte-range media with
     assert.equal(invalid.status, 400);
   }
   assert.equal((await (await fetch(`${base}/state`)).json()).last.runId, commandRunId);
+
+  const historyResponse = await fetch(`${base}/history?limit=3`);
+  assert.equal(historyResponse.status, 200);
+  const history = (await historyResponse.json()).history;
+  assert.equal(history.length, 3);
+  assert.equal(history[0].runId, commandRunId);
+  assert.equal(history[0].type, 'repository-command');
+  assert.equal(history[0].result, '2/2 CTest');
+  assert.equal(history[1].type, 'search');
+  const detailResponse = await fetch(`${base}/history/${search.runId}`);
+  assert.equal(detailResponse.status, 200);
+  const detail = await detailResponse.json();
+  assert.deepEqual(detail.operation, search.operation);
+  assert.match(detail.handoff, new RegExp(`RAW run:${search.runId}`));
+  assert.equal((await fetch(`${base}/history/${search.runId}/handoff`)).status, 200);
+  assert.equal((await fetch(`${base}/history/not-a-run`)).status, 404);
+  assert.equal((await fetch(`${base}/history?limit=0`)).status, 400);
+  const historicalSource = await fetch(`${base}/source?path=${encodeURIComponent('media/tone.wav')}&context=0&run=${search.runId}`);
+  assert.equal(historicalSource.status, 200);
+  assert.equal((await historicalSource.json()).runId, search.runId);
 });
