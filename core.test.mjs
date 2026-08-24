@@ -1,10 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, discoverCommands, fetchUpdate, formatPacket, gitSnapshot, operationDetail, operationHistory, parseSearchOutput, readProjectState, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
+import { buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, discoverCommands, fetchUpdate, formatPacket, gitSnapshot, operationDetail, operationHistory, parseSearchOutput, readProjectState, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -55,6 +55,7 @@ test('repository command execution resolves a current discovered identity and re
   assert.equal(readFileSync(record.stderrPath, 'utf8'), '');
   assert.equal(readFileSync(join(root, 'file.txt'), 'utf8'), 'changed by command\n');
   assert.deepEqual(record.delta.paths, ['file.txt']);
+  assert.equal(existsSync(join(project.store, 'runs', project.key, record.id, 'inflight.json')), false);
   assert.match(buildOperationHandoff(project, record), new RegExp(`RAW run:${record.id}`));
   assert.deepEqual(await operationHistory(project), [{
     runId: record.id, type: 'repository-command', name: 'native-tests', query: null, scope: '.',
@@ -110,12 +111,61 @@ test('repository command cancellation preserves partial changes and reversible e
   assert.equal(record.id, started.runId);
   assert.equal(record.status, 'cancelled');
   assert.equal(record.operation.status, 'cancelled');
+  assert.equal(existsSync(join(project.store, 'runs', project.key, record.id, 'inflight.json')), false);
   assert.deepEqual(record.delta.paths, ['partial.txt']);
   assert.equal(readFileSync(join(root, 'partial.txt'), 'utf8'), 'partial\n');
   assert.equal((await undoPlan(project, record.id)).state, 'SAFE');
   const undo = await undoOperation(project, record.id);
   assert.equal(undo.status, 'pass');
   assert.equal(existsSync(join(root, 'partial.txt')), false);
+});
+
+test('startup recovery records inactive in-flight evidence and preserves Undo', async () => {
+  const project = await fixtureProject();
+  const id = '20260824220000-dead';
+  const directory = join(project.store, 'runs', project.key, id);
+  mkdirSync(directory, { recursive: true });
+  const before = await gitSnapshot(project.root);
+  const currencyBefore = await repositoryCurrency(project.root);
+  const treeBefore = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: project.root, encoding: 'utf8' }).trim();
+  const stdoutPath = join(directory, 'stdout.log');
+  const stderrPath = join(directory, 'stderr.log');
+  writeFileSync(stdoutPath, 'STARTED\npartial output\n');
+  writeFileSync(stderrPath, '');
+  writeFileSync(join(project.root, 'interrupted.txt'), 'partial change\n');
+  writeFileSync(join(directory, 'inflight.json'), JSON.stringify({
+    schemaVersion: 1, id, project: project.identity.id, root: project.root,
+    request: 'run repository command fixture', command: 'node fixture.mjs', argv: ['node', 'fixture.mjs'],
+    objective: 'Run fixture', startedAt: '2026-08-24T22:00:00.000Z', pid: 2147483647,
+    captureDelta: true, treeBefore, gitBefore: before, currencyBefore, stdoutPath, stderrPath,
+    operationIdentity: { type: 'repository-command', name: 'fixture', displayCommand: 'node fixture.mjs' },
+  }));
+
+  assert.deepEqual(await recoverInterruptedRuns(project), { recovered: [id], detached: [] });
+  const record = runById(project, id);
+  assert.equal(record.status, 'interrupted');
+  assert.equal(record.exitCode, null);
+  assert.equal(record.operation.status, 'interrupted');
+  assert.deepEqual(record.delta.paths, ['interrupted.txt']);
+  assert.match(readFileSync(record.stdoutPath, 'utf8'), /partial output/);
+  assert.equal(existsSync(join(directory, 'inflight.json')), false);
+  assert.equal((await undoPlan(project, id)).state, 'SAFE');
+  await undoOperation(project, id);
+  assert.equal(existsSync(join(project.root, 'interrupted.txt')), false);
+  assert.deepEqual(await recoverInterruptedRuns(project), { recovered: [], detached: [] });
+
+  const liveId = '20260824220100-beef';
+  const liveDirectory = join(project.store, 'runs', project.key, liveId);
+  const liveStartedAt = new Date().toISOString();
+  mkdirSync(liveDirectory, { recursive: true });
+  writeFileSync(join(liveDirectory, 'inflight.json'), JSON.stringify({
+    id: liveId, project: project.identity.id, pid: process.pid,
+    command: 'node still-running.mjs', startedAt: liveStartedAt,
+  }));
+  assert.deepEqual(await recoverInterruptedRuns(project), {
+    recovered: [], detached: [{ runId: liveId, pid: process.pid, command: 'node still-running.mjs', startedAt: liveStartedAt }],
+  });
+  rmSync(liveDirectory, { recursive: true, force: true });
 });
 
 test('reducers retain concise evidence and cause classification', () => {

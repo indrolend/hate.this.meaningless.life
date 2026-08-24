@@ -137,6 +137,7 @@ async function main() {
     console.log(`HUD_URL=http://${running.host}:${running.port}/`);
     console.log(`ROOT=${project.root}`);
     console.log('MODE=TYPED_OPERATIONS');
+    if (running.recovery.recovered.length) console.log(`RECOVERED_INTERRUPTED=${running.recovery.recovered.join(',')}`);
     return;
   }
   if (command === 'search') {

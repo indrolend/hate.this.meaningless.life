@@ -180,7 +180,15 @@ While a repository command is active, `GET /runtime` reports its runtime-owned r
 
 Cancellation still completes an immutable `CANCELLED` run record with the output produced before termination, Git before/after state, and the captured content delta. Output may therefore contain complete-looking lines emitted before the cancellation took effect; the authoritative operation status remains `CANCELLED`. Partial repository changes remain in the worktree rather than being silently discarded, and the existing evidence-backed Undo flow is offered when that captured delta is safe to reverse.
 
-Cancellation currently applies only to repository commands started by the running server. Search and Undo remain short serialized operations, and an interrupted server process does not yet reconstruct or recover an in-flight run automatically.
+Cancellation currently applies only to repository commands started by the running server. Search and Undo remain short serialized operations.
+
+## Interrupted-run recovery
+
+Each spawned command now writes a small `inflight.json` journal beside its stdout and stderr before the visual runtime reports that the run has started. The journal preserves the exact command identity, process ID, starting Git/currency evidence, and pre-operation worktree tree. Normal completion writes the immutable `run.json` and removes the journal.
+
+When `hud serve` starts, it examines unfinished journals before accepting operations. If the recorded process no longer exists, CommandHUD captures the current Git state and worktree delta, retains the existing output, and finalizes the run as `INTERRUPTED` with a null exit code. It never treats recognizable partial output as proof of success. Recovered content changes use the same evidence-backed Undo check as completed and cancelled commands.
+
+If a journal's process ID still appears active, startup fails closed instead of starting a competing operation runtime or killing a process whose identity cannot be proven safely. The user can wait for or inspect that detached process before restarting CommandHUD. This recovery is local evidence repair, not resumable execution: CommandHUD does not reconnect to the old process stream or continue the command.
 
 In the live renderer, submitting Search sends structured `query` and `scope` JSON rather than a command string. The runtime validates it, runs `rg` directly without a shell, records the evidence, and returns refreshed semantic state. Snapshot mode keeps the same Search controls but only copies the equivalent CLI command without claiming execution.
 

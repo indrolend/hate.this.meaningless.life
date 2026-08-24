@@ -659,7 +659,9 @@
       if (!response.ok) throw new Error(detail.error || `History request failed with HTTP ${response.status}.`);
       if (detail.operation.type === 'search') return activateRecordedSearch(detail);
       $('#outputTitle').textContent = `${detail.operation.name} · ${detail.evidence}`;
-      const summary = detail.operation.summary?.join('; ') || `exit ${detail.operation.exitCode}`;
+      const summary = detail.status === 'interrupted'
+        ? 'Completion was not observed; retained output may be partial.'
+        : detail.operation.summary?.join('; ') || `exit ${detail.operation.exitCode}`;
       $('#outputText').textContent = `${detail.operation.command}\n\n${detail.status.toUpperCase()} · ${summary}\n${(detail.durationMs / 1000).toFixed(1)}s\nRaw evidence: run:${detail.runId}`;
       const actions = $('#outputActions');
       actions.replaceChildren(outputAction('Copy handoff', '', () => copyRecordedHandoff(detail)));

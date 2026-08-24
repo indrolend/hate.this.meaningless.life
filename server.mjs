@@ -2,7 +2,7 @@ import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSy
 import { createServer } from 'node:http';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildOperationHandoff, classifyEvidence, currentState, lastRun, operationDetail, operationHistory, repositoryCurrency, repositoryTree, runById, runRepositoryCommand, searchRepository, undoOperation, undoPlan } from './core.mjs';
+import { buildOperationHandoff, classifyEvidence, currentState, lastRun, operationDetail, operationHistory, recoverInterruptedRuns, repositoryCurrency, repositoryTree, runById, runRepositoryCommand, searchRepository, undoOperation, undoPlan } from './core.mjs';
 
 const staticRoot = join(dirname(fileURLToPath(import.meta.url)), 'visual-prototype');
 const contentTypes = {
@@ -372,11 +372,16 @@ export function createHudServer(project) {
 }
 
 export async function startHudServer(project, { host = '127.0.0.1', port = 8765 } = {}) {
+  const recovery = await recoverInterruptedRuns(project);
+  if (recovery.detached.length) {
+    const run = recovery.detached[0];
+    throw new Error(`A detached CommandHUD process still appears active for run ${run.runId}. Refusing to start another operation runtime.`);
+  }
   const server = createHudServer(project);
   await new Promise((resolveListen, reject) => {
     server.once('error', reject);
     server.listen(port, host, resolveListen);
   });
   const address = server.address();
-  return { server, host, port: typeof address === 'object' ? address.port : port };
+  return { server, host, port: typeof address === 'object' ? address.port : port, recovery };
 }

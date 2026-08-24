@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, platform, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -425,7 +425,9 @@ export function buildPresentation(record) {
   let headline = null;
   const details = [];
 
-  if (record.exitCode !== 0 && cause) {
+  if (record.status === 'interrupted') {
+    headline = 'CommandHUD stopped before this operation completed.';
+  } else if (record.exitCode !== 0 && cause) {
     headline = cause;
   } else if (summary.length) {
     headline = summary[0];
@@ -453,14 +455,16 @@ function createRunId(date = new Date()) {
 export function buildPacket(record) {
   const status = record.status.toUpperCase();
   const change = record.gitAfter.changedFiles.length ? record.gitAfter.changedFiles.join(' | ') : 'none';
-  const verify = record.reduction.summary.length ? record.reduction.summary.join('; ') : `exit ${record.exitCode}`;
+  const verify = record.status === 'interrupted' ? 'completion was not observed'
+    : record.reduction.summary.length ? record.reduction.summary.join('; ') : `exit ${record.exitCode}`;
   const packet = {
     STATUS: status,
     OBJECTIVE: record.objective || record.request || record.command,
     AUTHORITY: `${record.gitAfter.head} branch=${record.gitAfter.branch} dirty=${record.gitAfter.dirty}`,
     CHANGE: change,
     VERIFY: verify,
-    RESULT: record.operation?.type === 'search' && record.status === 'pass'
+    RESULT: record.status === 'interrupted' ? 'operation interrupted; inspect retained evidence and worktree changes'
+      : record.operation?.type === 'search' && record.status === 'pass'
       ? `${record.operation.matchCount} matches / ${record.operation.fileCount} files`
       : record.exitCode === 0 ? 'requested command completed' : `command exited ${record.exitCode}`,
   };
@@ -476,7 +480,7 @@ export function formatPacket(packet) {
 export async function runCommand(project, tokens, {
   objective, stream = true, request = null, workflow = null,
   acceptedExitCodes = [0], operationReducer = null, shell = true, captureDelta = false,
-  signal = null, onStart = null, onOutput = null,
+  signal = null, onStart = null, onOutput = null, operationIdentity = null,
 } = {}) {
   if (!tokens.length) throw new Error('hud run requires a command.');
   const command = tokens.map((token) => /[\s"']/.test(token) ? JSON.stringify(token) : token).join(' ');
@@ -514,6 +518,19 @@ export async function runCommand(project, tokens, {
       // The process may exit between the liveness check and termination request.
     }
   };
+  const inflightPath = join(runDirectory, 'inflight.json');
+  try {
+    writeFileSync(inflightPath, `${JSON.stringify({
+      schemaVersion: SCHEMA_VERSION, id, project: project.identity.id, root: project.root,
+      request: request || null, command, argv: tokens, objective: objective || null,
+      startedAt: started.toISOString(), pid: child.pid, captureDelta, treeBefore,
+      gitBefore: before, currencyBefore, stdoutPath, stderrPath, operationIdentity,
+    }, null, 2)}\n`, { flag: 'wx' });
+  } catch (error) {
+    await terminate(true);
+    stdoutFile.end(); stderrFile.end();
+    throw new Error(`Unable to journal running command: ${error.message}`);
+  }
   const cancel = () => {
     if (cancellationRequested) return;
     cancellationRequested = true;
@@ -581,10 +598,77 @@ export async function runCommand(project, tokens, {
   record.presentation = buildPresentation(record);
   record.packet = buildPacket(record);
   writeFileSync(join(runDirectory, 'run.json'), `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx' });
+  unlinkSync(inflightPath);
   const state = readProjectState(project);
   state.lastRunId = id;
   writeProjectState(project, state);
   return record;
+}
+
+function processAppearsAlive(pid) {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
+  try { process.kill(pid, 0); return true; }
+  catch (error) { return error?.code === 'EPERM'; }
+}
+
+export async function recoverInterruptedRuns(project) {
+  const runsRoot = join(project.store, 'runs', project.key);
+  if (!existsSync(runsRoot)) return { recovered: [], detached: [] };
+  const recovered = [];
+  const detached = [];
+  for (const id of readdirSync(runsRoot).sort()) {
+    if (!/^\d{14}-[0-9a-f]{4}$/i.test(id)) continue;
+    const runDirectory = join(runsRoot, id);
+    const inflightPath = join(runDirectory, 'inflight.json');
+    if (existsSync(join(runDirectory, 'run.json')) || !existsSync(inflightPath)) continue;
+    const inflight = readJson(inflightPath);
+    if (!inflight || inflight.id !== id || inflight.project !== project.identity.id) continue;
+    if (processAppearsAlive(inflight.pid)) {
+      detached.push({ runId: id, pid: inflight.pid, command: inflight.command, startedAt: inflight.startedAt });
+      continue;
+    }
+    const stdout = existsSync(inflight.stdoutPath) ? readFileSync(inflight.stdoutPath, 'utf8') : '';
+    const stderr = existsSync(inflight.stderrPath) ? readFileSync(inflight.stderrPath, 'utf8') : '';
+    const ended = new Date();
+    const [after, currencyAfter, treeAfter] = await Promise.all([
+      gitSnapshot(project.root), repositoryCurrency(project.root), inflight.captureDelta ? worktreeTree(project.root) : null,
+    ]);
+    const reduction = reduceOutput(inflight.command, stdout, stderr, 1, { root: project.root });
+    const record = {
+      schemaVersion: SCHEMA_VERSION, id, project: project.identity.id, root: project.root,
+      branch: inflight.gitBefore.branch, headBefore: inflight.gitBefore.head, headAfter: after.head, upstream: inflight.gitBefore.upstream,
+      request: inflight.request, command: inflight.command, argv: inflight.argv, cwd: project.root, objective: inflight.objective,
+      workflow: null, startedAt: inflight.startedAt, endedAt: ended.toISOString(),
+      durationMs: Math.max(0, ended - new Date(inflight.startedAt)), exitCode: null, status: 'interrupted',
+      dirtyBefore: inflight.gitBefore.dirty, dirtyAfter: after.dirty, changedFiles: after.changedFiles,
+      gitBefore: inflight.gitBefore, gitAfter: after, currencyBefore: inflight.currencyBefore, currencyAfter,
+      stdoutPath: inflight.stdoutPath, stderrPath: inflight.stderrPath, reducer: reduction.reducer, reduction,
+    };
+    if (inflight.captureDelta && inflight.treeBefore && treeAfter) {
+      const patch = await exec('git', ['diff', '--binary', '--full-index', inflight.treeBefore, treeAfter], project.root, { trim: false });
+      const names = await exec('git', ['diff', '--name-only', '-z', inflight.treeBefore, treeAfter], project.root, { trim: false });
+      if (!patch.ok || !names.ok) throw new Error(`Unable to recover interrupted operation delta: ${patch.stderr || names.stderr}`);
+      const paths = names.stdout.split('\0').filter(Boolean).map((path) => path.replaceAll('\\', '/'));
+      const patchPath = join(runDirectory, 'worktree.patch');
+      if (patch.stdout) writeFileSync(patchPath, patch.stdout, { flag: 'wx' });
+      record.delta = { kind: 'worktree-patch', treeBefore: inflight.treeBefore, treeAfter, paths, fileCount: paths.length, patchPath: patch.stdout ? patchPath : null };
+    }
+    if (inflight.operationIdentity?.type === 'repository-command') {
+      record.operation = {
+        ...inflight.operationIdentity, command: inflight.command, exitCode: null,
+        status: 'interrupted', durationMs: record.durationMs, summary: [...reduction.summary],
+      };
+    }
+    record.presentation = buildPresentation(record);
+    record.packet = buildPacket(record);
+    writeFileSync(join(runDirectory, 'run.json'), `${JSON.stringify(record, null, 2)}\n`, { flag: 'wx' });
+    unlinkSync(inflightPath);
+    const state = readProjectState(project);
+    state.lastRunId = id;
+    writeProjectState(project, state);
+    recovered.push(id);
+  }
+  return { recovered, detached };
 }
 
 export function parseSearchOutput(stdout) {
@@ -655,6 +739,7 @@ export async function runRepositoryCommand(project, name, { stream = false, sign
     shell: false,
     captureDelta: true,
     signal, onStart, onOutput,
+    operationIdentity: { type: 'repository-command', name: selected.name, displayCommand: selected.command },
     operationReducer: ({ exitCode, command, record }) => ({
       type: 'repository-command', name: selected.name,
       displayCommand: selected.command, command, exitCode,
@@ -714,8 +799,10 @@ export function buildOperationHandoff(project, record) {
   } else if (operation.type === 'repository-command') {
     lines.push(`NAME ${operation.name}`);
     lines.push(`COMMAND ${operation.command}`);
-    lines.push(`RESULT ${operation.status.toUpperCase()} exit=${operation.exitCode} duration=${operation.durationMs}ms`);
-    if (operation.summary.length) lines.push(`SUMMARY ${operation.summary.join('; ')}`);
+    lines.push(operation.status === 'interrupted'
+      ? `RESULT INTERRUPTED completion-not-observed duration=${operation.durationMs}ms`
+      : `RESULT ${operation.status.toUpperCase()} exit=${operation.exitCode} duration=${operation.durationMs}ms`);
+    if (operation.status !== 'interrupted' && operation.summary.length) lines.push(`SUMMARY ${operation.summary.join('; ')}`);
   } else if (operation.type === 'undo') {
     lines.push(`TARGET run:${operation.targetRunId}`);
     lines.push(`COMMAND ${operation.command}`);
@@ -928,7 +1015,8 @@ export async function operationHistory(project, limit = 25) {
     startedAt: record.startedAt,
     evidence: classifyEvidence(record.currencyAfter, currency),
     reversible: Boolean(record.delta?.patchPath && record.delta?.paths?.length),
-    result: record.operation.type === 'search'
+    result: record.status === 'interrupted' ? 'Interrupted; completion not observed'
+      : record.operation.type === 'search'
       ? `${record.operation.matchCount} matches / ${record.operation.fileCount} files`
       : record.operation.type === 'undo'
         ? `${record.operation.fileCount} files restored`
