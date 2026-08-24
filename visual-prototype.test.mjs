@@ -21,4 +21,7 @@ test('visual HUD exposes one main menu over one command directory', () => {
   assert.doesNotMatch(app, /Library ·/);
   assert.match(app, /openMenuSections = new Set\(\['HUD'\]\)/);
   assert.match(app, /dataset\.section/);
+  assert.match(app, /new EventSource\('\/events'\)/);
+  assert.match(app, /'\/session\/navigation'/);
+  assert.match(app, /synchronizeState/);
 });

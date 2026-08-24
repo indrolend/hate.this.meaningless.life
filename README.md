@@ -152,6 +152,14 @@ Each command records stdout, stderr, exit status, duration, Git state, and conte
 
 The terminal endpoint accepts only `{ command, shell }`, only while the server was created by the desktop host. The browser cannot supply a working directory, executable transport, evidence path, or process identity. This is a desktop authorization boundary rather than a claim that arbitrary project commands are safe.
 
+## Live local session
+
+Every view attached to one running HUD server now observes the same live repository session through `GET /events`. The server emits small server-sent events for operation lifecycle changes, completed semantic-state changes, and shared navigation. Clients fetch authoritative `currentState()` after a state event; the event itself does not become another repository state model.
+
+Directory and file focus can be shared through `POST /session/navigation`. The server accepts only a generated client identity and paths that exist in the current Git-backed repository projection. It rejects invented or out-of-repository paths, assigns a monotonic session revision, and broadcasts the accepted selection to the other connected views. A client ignores its own echoed selection. Camera position and transient open panels remain client-local so another screen does not make the current screen physically difficult to use.
+
+`GET /runtime` reports the repository session identity, connected event-stream clients, event sequence, and latest shared navigation alongside the existing operation and terminal facts. This session is currently process-local: restarting the runtime preserves immutable operation evidence but resets connected-client and navigation presence. There is no account, cloud relay, remote authentication, or background filesystem watcher in this checkpoint.
+
 File focus uses native browser controls to preview projected MP4, MOV, WebM, MP3, WAV, M4A, AAC, OGG, and FLAC files. Image formats are displayed directly. Media delivery supports byte ranges for seeking. Actual playback still depends on the codecs supported by the active browser; a `.mov` container is not proof that its internal codec can be decoded.
 
 ## Search and compact handoff

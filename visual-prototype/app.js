@@ -14,7 +14,7 @@
       if (runtimeResponse.ok) runtime = await runtimeResponse.json();
     }
   } catch {}
-  const repository = state?.repository;
+  let repository = state?.repository;
   let search = state?.lastOperation?.type === 'search' ? state.lastOperation : null;
   const searchFiles = new Map((search?.files || []).map((file) => [file.path, file]));
   const searchOrder = (search?.files || []).map((file) => file.path);
@@ -41,6 +41,8 @@
   let inputMode = 'terminal';
   const openMenuSections = new Set(['HUD']);
   let renderedCommands = [];
+  const clientId = globalThis.crypto?.randomUUID?.() || `hud-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  let lastNavigationRevision = 0;
 
   const commands = {
     HUD: [
@@ -138,6 +140,48 @@
     try {
       const response = await fetch('/runtime', { cache: 'no-store' });
       if (response.ok) showRuntime(await response.json());
+    } catch {}
+  }
+
+  async function publishNavigation() {
+    if (!liveState) return;
+    try {
+      await fetch('/session/navigation', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientId, directory: currentDirectory, file: selected?.path || null }),
+      });
+    } catch {}
+  }
+
+  async function synchronizeState() {
+    if (!liveState) return;
+    try {
+      const response = await fetch('/state', { cache: 'no-store' });
+      if (!response.ok) return;
+      state = await response.json();
+      repository = state.repository;
+      search = state.lastOperation?.type === 'search' ? state.lastOperation : null;
+      activeSearchRunId = search ? state.last?.runId : null;
+      searchFiles.clear();
+      for (const file of search?.files || []) searchFiles.set(file.path, file);
+      searchOrder.splice(0, searchOrder.length, ...(search?.files || []).map((file) => file.path));
+      filesByPath.clear();
+      directoriesByPath.clear();
+      indexDirectory(repository.root);
+      if (!directoriesByPath.has(currentDirectory)) currentDirectory = '';
+      if (selected && !filesByPath.has(selected.path)) selected = null;
+      else if (selected) selected = filesByPath.get(selected.path);
+      $('#branchValue').textContent = state.git.branch;
+      $('#fileCount').textContent = String(repository.fileCount);
+      $('#changeCount').textContent = String(state.git.changedFiles.length);
+      $('#changeCount').className = state.git.changedFiles.length ? 'warn' : 'good';
+      $('#snapshotState').textContent = state.git.head.slice(0, 7);
+      $('#snapshotState').className = state.git.dirty ? 'warn' : 'good';
+      $('#searchState').textContent = search ? `${search.matchCount} matches` : 'none';
+      renderTree();
+      renderMap();
+      if (selected) openFile(selected.path, false, false);
+      else closeFocus();
     } catch {}
   }
 
@@ -269,7 +313,7 @@
     applyCamera();
   }
 
-  function enterDirectory(path, reset = true) {
+  function enterDirectory(path, reset = true, share = true) {
     if (!directoriesByPath.has(path)) return;
     currentDirectory = path;
     openDirectories.add(path);
@@ -284,9 +328,10 @@
     renderTree();
     renderMap();
     if (reset) resetCamera();
+    if (share) void publishNavigation();
   }
 
-  function openFile(path, fly = false) {
+  function openFile(path, fly = false, share = true) {
     const file = filesByPath.get(path);
     if (!file) return;
     selected = file;
@@ -318,6 +363,7 @@
         applyCamera();
       }
     }
+    if (share) void publishNavigation();
   }
 
   function renderMedia(file) {
@@ -1166,6 +1212,35 @@
       togglePicker();
     }
   });
+
+  function applySharedNavigation(value) {
+    if (!value || value.revision <= lastNavigationRevision) return;
+    lastNavigationRevision = value.revision;
+    if (value.clientId === clientId) return;
+    if (value.file && filesByPath.has(value.file)) openFile(value.file, true, false);
+    else if (directoriesByPath.has(value.directory || '')) enterDirectory(value.directory || '', true, false);
+  }
+
+  if (liveState && typeof EventSource !== 'undefined') {
+    const events = new EventSource('/events');
+    events.addEventListener('connected', async () => {
+      await refreshRuntime();
+      applySharedNavigation(runtime?.session?.navigation);
+    });
+    events.addEventListener('operation', (event) => {
+      try {
+        const value = JSON.parse(event.data);
+        showRuntime({ ...runtime, busy: value.operation });
+      } catch {}
+    });
+    events.addEventListener('state', async () => {
+      await Promise.all([synchronizeState(), refreshRuntime()]);
+    });
+    events.addEventListener('navigation', (event) => {
+      try { applySharedNavigation(JSON.parse(event.data).navigation); } catch {}
+    });
+    window.addEventListener('beforeunload', () => events.close(), { once: true });
+  }
 
   renderTree();
   renderMap();

@@ -56,6 +56,22 @@ async function waitForActiveEvidence(base, runId, pattern, timeoutMs = 2000) {
   throw new Error('Timed out waiting for active HUD evidence.');
 }
 
+async function nextSseEvent(reader, pending = { text: '' }) {
+  while (true) {
+    const boundary = pending.text.indexOf('\n\n');
+    if (boundary >= 0) {
+      const block = pending.text.slice(0, boundary);
+      pending.text = pending.text.slice(boundary + 2);
+      const type = block.match(/^event: (.+)$/m)?.[1];
+      const data = block.match(/^data: (.+)$/m)?.[1];
+      if (type && data) return { type, value: JSON.parse(data) };
+    }
+    const chunk = await reader.read();
+    if (chunk.done) throw new Error('SSE stream ended before an event arrived.');
+    pending.text += new TextDecoder().decode(chunk.value);
+  }
+}
+
 test('HUD server refuses corrupt interrupted evidence', async () => {
   const project = await fixtureProject();
   const id = '20260824220300-cafe';
@@ -108,6 +124,45 @@ test('terminal execution is desktop-only and persists repository-contained cwd',
     method: 'POST', headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ shell: shell.id, command: exact, cwd: '..' }),
   })).status, 400);
+});
+
+test('live session streams operation state and validated shared navigation', async (t) => {
+  const project = await fixtureProject();
+  const running = await startHudServer(project, { port: 0, terminal: true });
+  t.after(() => running.server.close());
+  const base = `http://127.0.0.1:${running.port}`;
+  const controller = new AbortController();
+  t.after(() => controller.abort());
+  const stream = await fetch(`${base}/events`, { signal: controller.signal });
+  assert.equal(stream.headers.get('content-type'), 'text/event-stream; charset=utf-8');
+  const reader = stream.body.getReader();
+  const pending = { text: '' };
+  assert.equal((await nextSseEvent(reader, pending)).type, 'connected');
+  assert.equal((await (await fetch(`${base}/runtime`)).json()).session.connectedClients, 1);
+
+  const navigationResponse = await fetch(`${base}/session/navigation`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientId: 'fixture-client-1', directory: 'tools', file: null }),
+  });
+  assert.equal(navigationResponse.status, 200);
+  const navigationEvent = await nextSseEvent(reader, pending);
+  assert.equal(navigationEvent.type, 'navigation');
+  assert.equal(navigationEvent.value.navigation.directory, 'tools');
+  assert.equal((await fetch(`${base}/session/navigation`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ clientId: 'fixture-client-1', directory: '../outside', file: null }),
+  })).status, 400);
+
+  const command = fetch(`${base}/operations/terminal`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ shell: process.platform === 'win32' ? 'powershell' : 'bash', command: 'echo SESSION_EVENT_OK' }),
+  });
+  const observed = [];
+  while (!observed.includes('state') || observed.filter((type) => type === 'operation').length < 2) {
+    observed.push((await nextSseEvent(reader, pending)).type);
+  }
+  assert.equal((await command).status, 200);
+  assert.ok(observed.includes('state'));
 });
 
 test('HUD server serializes typed operations and exposes bounded evidence, live reads, and media', async (t) => {

@@ -81,6 +81,17 @@ function cancelRequest(value) {
   return { runId: value.runId };
 }
 
+function navigationRequest(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('Navigation request must be an object.'), { statusCode: 400 });
+  const unknown = Object.keys(value).filter((key) => !['clientId', 'directory', 'file'].includes(key));
+  if (unknown.length) throw Object.assign(new Error(`Unsupported navigation fields: ${unknown.join(', ')}`), { statusCode: 400 });
+  if (typeof value.clientId !== 'string' || !/^[A-Za-z0-9._-]{8,100}$/.test(value.clientId)) throw Object.assign(new Error('Navigation requires a valid client identity.'), { statusCode: 400 });
+  for (const key of ['directory', 'file']) {
+    if (value[key] !== null && value[key] !== undefined && (typeof value[key] !== 'string' || value[key].length > 1000)) throw Object.assign(new Error(`Navigation ${key} must be a bounded repository path or null.`), { statusCode: 400 });
+  }
+  return { clientId: value.clientId, directory: value.directory || '', file: value.file || null };
+}
+
 function validateOperationRequest(request) {
   if (!String(request.headers['content-type'] || '').toLowerCase().startsWith('application/json')) {
     throw Object.assign(new Error('Operation requests require application/json.'), { statusCode: 415 });
@@ -98,6 +109,12 @@ function validateOperationRequest(request) {
 function projectedPaths(directory, result = new Set()) {
   for (const file of directory.files) result.add(file.path);
   for (const child of directory.directories) projectedPaths(child, result);
+  return result;
+}
+
+function projectedDirectories(directory, result = new Set([''])) {
+  result.add(directory.path || '');
+  for (const child of directory.directories) projectedDirectories(child, result);
   return result;
 }
 
@@ -199,6 +216,15 @@ export function createHudServer(project, { terminal = false } = {}) {
   let activeOperation = null;
   let activeExecution = null;
   let terminalCwd = project.root;
+  let eventSequence = 0;
+  const eventClients = new Set();
+  let navigation = { revision: 0, clientId: null, directory: '', file: null, updatedAt: null };
+  const publish = (type, payload = {}) => {
+    const event = { id: ++eventSequence, type, at: new Date().toISOString(), ...payload };
+    const body = `id: ${event.id}\nevent: ${type}\ndata: ${JSON.stringify(event)}\n\n`;
+    for (const response of eventClients) response.write(body);
+    return event;
+  };
   const runTypedOperation = async (type, label, action, { cancellable = false } = {}) => {
     if (activeOperation) {
       const error = Object.assign(new Error(`CommandHUD is busy with ${activeOperation.type}: ${activeOperation.label}`), { statusCode: 409 });
@@ -207,18 +233,40 @@ export function createHudServer(project, { terminal = false } = {}) {
     }
     const controller = new AbortController();
     activeOperation = { type, label, state: 'starting', startedAt: new Date().toISOString(), runId: null, cancellable };
+    publish('operation', { operation: activeOperation });
     activeExecution = { controller, stdoutPath: null, stderrPath: null };
     const onStart = (value) => {
       activeOperation = { ...activeOperation, state: 'running', runId: value.runId, command: value.command, startedAt: value.startedAt };
       activeExecution.stdoutPath = value.stdoutPath;
       activeExecution.stderrPath = value.stderrPath;
+      publish('operation', { operation: activeOperation });
     };
-    try { return await action({ signal: controller.signal, onStart }); }
-    finally { activeOperation = null; activeExecution = null; }
+    try {
+      const record = await action({ signal: controller.signal, onStart });
+      publish('state', { reason: 'operation-complete', runId: record.id, status: record.status, operationType: record.operation?.type || type });
+      return record;
+    } finally {
+      activeOperation = null; activeExecution = null;
+      publish('operation', { operation: null });
+    }
   };
   return createServer(async (request, response) => {
     try {
       const url = new URL(request.url, 'http://localhost');
+      if (request.method === 'GET' && url.pathname === '/events') {
+        response.writeHead(200, {
+          'Content-Type': 'text/event-stream; charset=utf-8',
+          'Cache-Control': 'no-store',
+          'Connection': 'keep-alive',
+          'X-Accel-Buffering': 'no',
+        });
+        response.write(`event: connected\ndata: ${JSON.stringify({ type: 'connected', session: project.key, eventSequence })}\n\n`);
+        eventClients.add(response);
+        const heartbeat = setInterval(() => response.write(': keepalive\n\n'), 15000);
+        heartbeat.unref?.();
+        request.on('close', () => { clearInterval(heartbeat); eventClients.delete(response); });
+        return;
+      }
       if (request.method === 'POST' && url.pathname === '/operations/search') {
         validateOperationRequest(request);
         const operation = searchRequest(await jsonBody(request));
@@ -244,8 +292,22 @@ export function createHudServer(project, { terminal = false } = {}) {
           throw Object.assign(new Error('The requested run is not the active cancellable operation.'), { statusCode: 409 });
         }
         activeOperation = { ...activeOperation, state: 'cancelling' };
+        publish('operation', { operation: activeOperation });
         activeExecution.controller.abort();
         json(response, 202, { runId: operation.runId, status: 'cancelling' });
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/session/navigation') {
+        validateOperationRequest(request);
+        const requested = navigationRequest(await jsonBody(request));
+        const tree = await repositoryTree(project.root);
+        const files = projectedPaths(tree.root);
+        const directories = projectedDirectories(tree.root);
+        if (!directories.has(requested.directory)) throw Object.assign(new Error('Navigation directory is not in the current repository projection.'), { statusCode: 400 });
+        if (requested.file && !files.has(requested.file)) throw Object.assign(new Error('Navigation file is not in the current repository projection.'), { statusCode: 400 });
+        navigation = { ...requested, revision: navigation.revision + 1, updatedAt: new Date().toISOString() };
+        publish('navigation', { navigation });
+        json(response, 200, { navigation });
         return;
       }
       if (request.method === 'POST' && url.pathname === '/operations/repository-command') {
@@ -324,6 +386,7 @@ export function createHudServer(project, { terminal = false } = {}) {
           busy: activeOperation,
           capabilities: { terminal, shells },
           terminal: terminal ? { cwd: terminalCwd, displayCwd: relative(project.root, terminalCwd).replaceAll('\\', '/') || '.' } : null,
+          session: { id: project.key, connectedClients: eventClients.size, eventSequence, navigation },
         });
         return;
       }
