@@ -2,7 +2,7 @@ import { createReadStream, existsSync, readFileSync, statSync } from 'node:fs';
 import { createServer } from 'node:http';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildOperationHandoff, classifyEvidence, currentState, lastRun, operationDetail, operationHistory, repositoryCurrency, repositoryTree, runById, runRepositoryCommand, searchRepository } from './core.mjs';
+import { buildOperationHandoff, classifyEvidence, currentState, lastRun, operationDetail, operationHistory, repositoryCurrency, repositoryTree, runById, runRepositoryCommand, searchRepository, undoOperation, undoPlan } from './core.mjs';
 
 const staticRoot = join(dirname(fileURLToPath(import.meta.url)), 'visual-prototype');
 const contentTypes = {
@@ -54,6 +54,14 @@ function repositoryCommandRequest(value) {
   if (unknown.length) throw Object.assign(new Error(`Unsupported repository command fields: ${unknown.join(', ')}`), { statusCode: 400 });
   if (typeof value.name !== 'string' || !value.name.trim() || value.name.length > 200) throw Object.assign(new Error('Repository command name must be 1-200 characters.'), { statusCode: 400 });
   return { name: value.name };
+}
+
+function undoRequest(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('Undo request must be an object.'), { statusCode: 400 });
+  const unknown = Object.keys(value).filter((key) => key !== 'runId');
+  if (unknown.length) throw Object.assign(new Error(`Unsupported Undo fields: ${unknown.join(', ')}`), { statusCode: 400 });
+  if (typeof value.runId !== 'string' || !/^\d{14}-[0-9a-f]{4}$/i.test(value.runId)) throw Object.assign(new Error('Undo requires a valid recorded run ID.'), { statusCode: 400 });
+  return { runId: value.runId };
 }
 
 function validateOperationRequest(request) {
@@ -186,6 +194,23 @@ export function createHudServer(project) {
         });
         return;
       }
+      if (request.method === 'POST' && url.pathname === '/operations/undo') {
+        validateOperationRequest(request);
+        const operation = undoRequest(await jsonBody(request));
+        let record;
+        try { record = await undoOperation(project, operation.runId); }
+        catch (error) {
+          if (/^(?:Structured operation run was not found|Undo is )/.test(error.message)) error.statusCode = 409;
+          throw error;
+        }
+        json(response, 200, {
+          runId: record.id, status: record.status, operation: record.operation,
+          presentation: record.presentation,
+          evidence: { stdout: record.stdoutPath, stderr: record.stderrPath },
+          state: await currentState(project),
+        });
+        return;
+      }
       if (!['GET', 'HEAD'].includes(request.method)) {
         json(response, 405, { error: 'Only typed CommandHUD operations accept local mutation requests.' });
         return;
@@ -202,6 +227,15 @@ export function createHudServer(project) {
         const limit = Number(url.searchParams.get('limit') || 25);
         if (!Number.isInteger(limit) || limit < 1 || limit > 100) throw Object.assign(new Error('History limit must be an integer from 1 to 100.'), { statusCode: 400 });
         json(response, 200, { history: await operationHistory(project, limit) });
+        return;
+      }
+      const undoMatch = url.pathname.match(/^\/undo\/(\d{14}-[0-9a-f]{4})$/i);
+      if (undoMatch) {
+        try { json(response, 200, await undoPlan(project, undoMatch[1])); }
+        catch (error) {
+          if (/^Structured operation run was not found/.test(error.message)) error.statusCode = 404;
+          throw error;
+        }
         return;
       }
       const historyMatch = url.pathname.match(/^\/history\/(\d{14}-[0-9a-f]{4})(\/handoff)?$/i);

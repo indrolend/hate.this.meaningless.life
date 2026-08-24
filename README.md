@@ -156,6 +156,14 @@ The live History control projects existing structured run records; it does not c
 
 Selecting a recorded Search reconstructs its saved matches and repository highlights without executing `rg` again. Source excerpts accept that validated Search run identity and retain the same projected-file, recorded-match, size, binary, and context limits as the latest-Search view. Selecting a recorded repository command shows its saved reduction and evidence reference; it does not infer test ownership or touched files.
 
+## Evidence-backed Undo
+
+Repository-command runs capture their own content-level worktree delta as a full-index Git binary patch in the immutable run directory. The prominent Undo control selects the latest recorded reversible operation, asks the runtime to check the inverse patch against the current worktree, and always presents the affected paths before enabling Apply Undo. The renderer submits only the target run ID.
+
+Undo is a new forward operation: it runs the recorded inverse, captures its own inverse delta, and writes another immutable evidence record. Undoing that Undo provides a factual Redo. If later content overlaps the recorded patch, `git apply --reverse --check` classifies the plan as `CONFLICT` and no mutation is attempted. Read-only and no-change operations report `NO_CHANGE`. This initial boundary restores worktree content only; it does not rewrite commits, reverse pushes, or claim to compensate for external effects.
+
+CLI parity is available through `node tools/hud/cli.mjs undo-plan <runId>` and `node tools/hud/cli.mjs undo <runId>`. Both derive the action from the runtime-owned immutable record; neither accepts a patch from the caller.
+
 In the live renderer, submitting Search sends structured `query` and `scope` JSON rather than a command string. The runtime validates it, runs `rg` directly without a shell, records the evidence, and returns refreshed semantic state. Snapshot mode keeps the same Search controls but only copies the equivalent CLI command without claiming execution.
 
 `hud visual-state` remains a compatibility path for static hosting. It writes ignored `hud-state.js`, which contains machine-specific paths and transient Git state. Static mode can navigate that snapshot but cannot stream repository media. The browser command bar stages and copies exact commands; actual command execution remains owned by the CLI and Windows bridge.

@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildOperationHandoff, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildOperationHandoff, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 function parse(argv) {
   const args = [...argv];
@@ -184,6 +184,30 @@ async function main() {
       console.log(`RAW run:${record.id}`);
     }
     process.exitCode = record.status === 'pass' ? 0 : record.status === 'blocked' ? 2 : 1;
+    return;
+  }
+  if (command === 'undo-plan') {
+    const runId = args[0];
+    if (!runId) throw new Error('hud undo-plan requires a recorded run ID.');
+    const plan = await undoPlan(project, runId);
+    if (options.json) return console.log(JSON.stringify(plan, null, 2));
+    printObject({ run: plan.runId, state: plan.state, files: plan.fileCount, reason: plan.reason });
+    for (const path of plan.paths) console.log(path);
+    return;
+  }
+  if (command === 'undo') {
+    const runId = args[0];
+    if (!runId) throw new Error('hud undo requires a recorded run ID.');
+    const record = await undoOperation(project, runId, { stream: !options.quiet });
+    if (options.json) return console.log(JSON.stringify({
+      runId: record.id, status: record.status, operation: record.operation,
+      stdoutPath: record.stdoutPath, stderrPath: record.stderrPath, currency: record.currencyAfter,
+    }, null, 2));
+    console.log(`UNDO ${record.operation.targetRunId}`);
+    console.log(`STATUS ${record.status.toUpperCase()}`);
+    console.log(`FILES ${record.operation.fileCount}`);
+    for (const path of record.operation.paths) console.log(path);
+    console.log(`RAW run:${record.id}`);
     return;
   }
   if (command === 'handoff') {

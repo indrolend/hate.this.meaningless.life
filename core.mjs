@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
-import { homedir, platform } from 'node:os';
+import { createWriteStream, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
+import { homedir, platform, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
 
@@ -15,9 +15,9 @@ export function stateRoot(env = process.env) {
   return join(env.XDG_STATE_HOME || join(homedir(), '.local', 'state'), 'commandhud');
 }
 
-async function exec(command, args, cwd, { trim = true } = {}) {
+async function exec(command, args, cwd, { trim = true, env = process.env } = {}) {
   try {
-    const result = await execFileAsync(command, args, { cwd, windowsHide: true, encoding: 'utf8' });
+    const result = await execFileAsync(command, args, { cwd, windowsHide: true, encoding: 'utf8', env, maxBuffer: 64 * 1024 * 1024 });
     return {
       ok: true,
       code: 0,
@@ -31,6 +31,23 @@ async function exec(command, args, cwd, { trim = true } = {}) {
       stdout: trim ? String(error.stdout || '').trim() : String(error.stdout || ''),
       stderr: trim ? String(error.stderr || error.message || '').trim() : String(error.stderr || error.message || ''),
     };
+  }
+}
+
+async function worktreeTree(root) {
+  const temporary = mkdtempSync(join(tmpdir(), 'commandhud-index-'));
+  const env = { ...process.env, GIT_INDEX_FILE: join(temporary, 'index') };
+  try {
+    const head = await exec('git', ['rev-parse', '--verify', 'HEAD'], root);
+    const seeded = await exec('git', head.ok ? ['read-tree', 'HEAD'] : ['read-tree', '--empty'], root, { env });
+    if (!seeded.ok) throw new Error(`Unable to prepare worktree evidence: ${seeded.stderr}`);
+    const added = await exec('git', ['add', '-A', '--', '.'], root, { env });
+    if (!added.ok) throw new Error(`Unable to capture worktree evidence: ${added.stderr}`);
+    const tree = await exec('git', ['write-tree'], root, { env });
+    if (!tree.ok) throw new Error(`Unable to write worktree evidence: ${tree.stderr}`);
+    return tree.stdout;
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
   }
 }
 
@@ -458,11 +475,13 @@ export function formatPacket(packet) {
 
 export async function runCommand(project, tokens, {
   objective, stream = true, request = null, workflow = null,
-  acceptedExitCodes = [0], operationReducer = null, shell = true,
+  acceptedExitCodes = [0], operationReducer = null, shell = true, captureDelta = false,
 } = {}) {
   if (!tokens.length) throw new Error('hud run requires a command.');
   const command = tokens.map((token) => /[\s"']/.test(token) ? JSON.stringify(token) : token).join(' ');
-  const [before, currencyBefore] = await Promise.all([gitSnapshot(project.root), repositoryCurrency(project.root)]);
+  const [before, currencyBefore, treeBefore] = await Promise.all([
+    gitSnapshot(project.root), repositoryCurrency(project.root), captureDelta ? worktreeTree(project.root) : null,
+  ]);
   const id = createRunId();
   const runDirectory = join(project.store, 'runs', project.key, id);
   mkdirSync(dirname(runDirectory), { recursive: true });
@@ -495,7 +514,9 @@ export async function runCommand(project, tokens, {
   });
   await Promise.all([new Promise((r) => stdoutFile.end(r)), new Promise((r) => stderrFile.end(r))]);
   const ended = new Date();
-  const [after, currencyAfter] = await Promise.all([gitSnapshot(project.root), repositoryCurrency(project.root)]);
+  const [after, currencyAfter, treeAfter] = await Promise.all([
+    gitSnapshot(project.root), repositoryCurrency(project.root), captureDelta ? worktreeTree(project.root) : null,
+  ]);
   const reduction = reduceOutput(command, stdout, stderr, exitCode, { root: project.root });
   const missingCommand = exitCode !== 0 && /(?:command not found|is not recognized as (?:a name of |the name of )?a? ?(?:cmdlet|function|script file|executable program)|ENOENT)/i.test(normalizeTerminalText(`${stdout}\n${stderr}`));
   const accepted = acceptedExitCodes.includes(exitCode);
@@ -517,6 +538,19 @@ export async function runCommand(project, tokens, {
     currencyBefore, currencyAfter,
     stdoutPath, stderrPath, reducer: reduction.reducer, reduction,
   };
+  if (captureDelta) {
+    const patch = await exec('git', ['diff', '--binary', '--full-index', treeBefore, treeAfter], project.root, { trim: false });
+    if (!patch.ok) throw new Error(`Unable to derive operation delta: ${patch.stderr}`);
+    const names = await exec('git', ['diff', '--name-only', '-z', treeBefore, treeAfter], project.root, { trim: false });
+    if (!names.ok) throw new Error(`Unable to list operation delta: ${names.stderr}`);
+    const paths = names.stdout.split('\0').filter(Boolean).map((path) => path.replaceAll('\\', '/'));
+    const patchPath = join(runDirectory, 'worktree.patch');
+    if (patch.stdout) writeFileSync(patchPath, patch.stdout, { flag: 'wx' });
+    record.delta = {
+      kind: 'worktree-patch', treeBefore, treeAfter, paths,
+      fileCount: paths.length, patchPath: patch.stdout ? patchPath : null,
+    };
+  }
   if (operationReducer) record.operation = operationReducer({ stdout, stderr, exitCode, command, record });
   record.presentation = buildPresentation(record);
   record.packet = buildPacket(record);
@@ -593,11 +627,43 @@ export async function runRepositoryCommand(project, name, { stream = false } = {
     objective: `Run ${selected.command}`,
     stream,
     shell: false,
+    captureDelta: true,
     operationReducer: ({ exitCode, command, record }) => ({
       type: 'repository-command', name: selected.name,
       displayCommand: selected.command, command, exitCode,
       status: record.status, durationMs: record.durationMs,
       summary: [...record.reduction.summary],
+    }),
+  });
+}
+
+export async function undoPlan(project, runId) {
+  const record = runById(project, runId);
+  if (!record?.operation) throw new Error(`Structured operation run was not found: ${runId}`);
+  if (!record.delta?.patchPath || !record.delta.paths?.length || !existsSync(record.delta.patchPath)) {
+    return { runId: record.id, operation: record.operation.type, state: 'NO_CHANGE', paths: [], fileCount: 0, reason: 'The recorded operation has no content-level worktree change.' };
+  }
+  const check = await exec('git', ['apply', '--reverse', '--check', '--binary', record.delta.patchPath], project.root);
+  return {
+    runId: record.id, operation: record.operation.type,
+    state: check.ok ? 'SAFE' : 'CONFLICT',
+    paths: [...record.delta.paths], fileCount: record.delta.paths.length,
+    reason: check.ok ? 'The recorded inverse patch applies cleanly to the current worktree.' : (check.stderr || 'The current worktree no longer matches the recorded operation result.'),
+  };
+}
+
+export async function undoOperation(project, runId, { stream = false } = {}) {
+  const plan = await undoPlan(project, runId);
+  if (plan.state !== 'SAFE') throw new Error(`Undo is ${plan.state}: ${plan.reason}`);
+  const target = runById(project, runId);
+  return runCommand(project, ['git', 'apply', '--reverse', '--binary', target.delta.patchPath], {
+    request: `undo recorded operation ${target.id}`,
+    objective: `Safely reverse ${target.operation.type} run:${target.id}`,
+    stream, shell: false, captureDelta: true,
+    operationReducer: ({ exitCode, command, record }) => ({
+      type: 'undo', targetRunId: target.id, targetType: target.operation.type,
+      command, exitCode, status: record.status, durationMs: record.durationMs,
+      paths: [...plan.paths], fileCount: plan.fileCount,
     }),
   });
 }
@@ -623,6 +689,11 @@ export function buildOperationHandoff(project, record) {
     lines.push(`COMMAND ${operation.command}`);
     lines.push(`RESULT ${operation.status.toUpperCase()} exit=${operation.exitCode} duration=${operation.durationMs}ms`);
     if (operation.summary.length) lines.push(`SUMMARY ${operation.summary.join('; ')}`);
+  } else if (operation.type === 'undo') {
+    lines.push(`TARGET run:${operation.targetRunId}`);
+    lines.push(`COMMAND ${operation.command}`);
+    lines.push(`RESULT ${operation.status.toUpperCase()} ${operation.fileCount} files duration=${operation.durationMs}ms`);
+    lines.push('', 'FILES', ...operation.paths);
   }
   lines.push('', `RAW run:${record.id}`, `STDOUT ${record.stdoutPath}`, `STDERR ${record.stderrPath}`);
   return lines.join('\n');
@@ -821,7 +892,7 @@ export async function operationHistory(project, limit = 25) {
   return listRuns(project, 100).filter((record) => record.operation).slice(0, bounded).map((record) => ({
     runId: record.id,
     type: record.operation.type,
-    name: record.operation.name || null,
+    name: record.operation.name || (record.operation.type === 'undo' ? `Undo ${record.operation.targetRunId}` : null),
     query: record.operation.query || null,
     scope: record.operation.scope || '.',
     command: record.operation.command,
@@ -829,9 +900,12 @@ export async function operationHistory(project, limit = 25) {
     durationMs: record.durationMs,
     startedAt: record.startedAt,
     evidence: classifyEvidence(record.currencyAfter, currency),
+    reversible: Boolean(record.delta?.patchPath && record.delta?.paths?.length),
     result: record.operation.type === 'search'
       ? `${record.operation.matchCount} matches / ${record.operation.fileCount} files`
-      : record.operation.summary?.join('; ') || `exit ${record.exitCode}`,
+      : record.operation.type === 'undo'
+        ? `${record.operation.fileCount} files restored`
+        : record.operation.summary?.join('; ') || `exit ${record.exitCode}`,
   }));
 }
 

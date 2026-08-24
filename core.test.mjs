@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, discoverCommands, fetchUpdate, formatPacket, gitSnapshot, operationDetail, operationHistory, parseSearchOutput, readProjectState, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, searchRepository, setWorkingValue, workingValue, workflowView } from './core.mjs';
+import { buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, discoverCommands, fetchUpdate, formatPacket, gitSnapshot, operationDetail, operationHistory, parseSearchOutput, readProjectState, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -39,7 +39,7 @@ test('repository command discovery derives a deterministic inspectable library',
 test('repository command execution resolves a current discovered identity and records evidence', async () => {
   const root = fixture();
   mkdirSync(join(root, 'tools'));
-  writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'console.log("100% tests passed, 0 tests failed out of 3")\n');
+  writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync(new URL("../file.txt", import.meta.url), "changed by command\\n"); console.log("100% tests passed, 0 tests failed out of 3")\n');
   execFileSync('git', ['add', 'tools/run-native-tests.mjs'], { cwd: root });
   execFileSync('git', ['commit', '-m', 'add command fixture'], { cwd: root });
   const project = await resolveProject({ cwd: root, env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'hud-command-state-')) } });
@@ -53,11 +53,13 @@ test('repository command execution resolves a current discovered identity and re
   assert.deepEqual(record.operation.summary, ['3/3 CTest']);
   assert.match(readFileSync(record.stdoutPath, 'utf8'), /100% tests passed/);
   assert.equal(readFileSync(record.stderrPath, 'utf8'), '');
+  assert.equal(readFileSync(join(root, 'file.txt'), 'utf8'), 'changed by command\n');
+  assert.deepEqual(record.delta.paths, ['file.txt']);
   assert.match(buildOperationHandoff(project, record), new RegExp(`RAW run:${record.id}`));
   assert.deepEqual(await operationHistory(project), [{
     runId: record.id, type: 'repository-command', name: 'native-tests', query: null, scope: '.',
     command: 'node tools/run-native-tests.mjs', status: 'pass', durationMs: record.durationMs,
-    startedAt: record.startedAt, evidence: 'CURRENT', result: '3/3 CTest',
+    startedAt: record.startedAt, evidence: 'CURRENT', reversible: true, result: '3/3 CTest',
   }]);
   const detail = await operationDetail(project, record.id);
   assert.equal(detail.runId, record.id);
@@ -67,12 +69,27 @@ test('repository command execution resolves a current discovered identity and re
   assert.match(detail.handoff, /OPERATION REPOSITORY-COMMAND/);
   assert.equal(runById(project, '../run.json'), null);
 
-  writeFileSync(join(root, 'file.txt'), 'history is now stale\n');
+  assert.deepEqual(await undoPlan(project, record.id), {
+    runId: record.id, operation: 'repository-command', state: 'SAFE', paths: ['file.txt'], fileCount: 1,
+    reason: 'The recorded inverse patch applies cleanly to the current worktree.',
+  });
+  const undo = await undoOperation(project, record.id);
+  assert.equal(undo.operation.type, 'undo');
+  assert.equal(undo.operation.targetRunId, record.id);
+  assert.equal(readFileSync(join(root, 'file.txt'), 'utf8'), 'initial\n');
+  assert.equal((await undoPlan(project, undo.id)).state, 'SAFE');
+  const redo = await undoOperation(project, undo.id);
+  assert.equal(redo.operation.targetRunId, undo.id);
+  assert.equal(readFileSync(join(root, 'file.txt'), 'utf8'), 'changed by command\n');
+  writeFileSync(join(root, 'file.txt'), 'overlapping later edit\n');
+  assert.equal((await undoPlan(project, record.id)).state, 'CONFLICT');
+  await assert.rejects(() => undoOperation(project, record.id), /Undo is CONFLICT/);
+
   assert.equal((await operationHistory(project))[0].evidence, 'STALE');
   writeFileSync(join(root, 'file.txt'), 'initial\n');
 
   await assert.rejects(() => runRepositoryCommand(project, 'not-declared'), /Unknown repository command/);
-  assert.equal(readProjectState(project).lastRunId, record.id);
+  assert.equal(readProjectState(project).lastRunId, redo.id);
 });
 
 test('reducers retain concise evidence and cause classification', () => {

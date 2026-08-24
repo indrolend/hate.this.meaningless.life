@@ -598,10 +598,96 @@
       const summary = detail.operation.summary?.join('; ') || `exit ${detail.operation.exitCode}`;
       $('#outputText').textContent = `${detail.operation.command}\n\n${detail.status.toUpperCase()} · ${summary}\n${(detail.durationMs / 1000).toFixed(1)}s\nRaw evidence: run:${detail.runId}`;
       const actions = $('#outputActions');
-      actions.replaceChildren(outputAction('Copy handoff', 'confirm', () => copyRecordedHandoff(detail)));
+      actions.replaceChildren(outputAction('Copy handoff', '', () => copyRecordedHandoff(detail)));
+      const planResponse = await fetch(`/undo/${encodeURIComponent(detail.runId)}`, { cache: 'no-store' });
+      const plan = await planResponse.json();
+      if (planResponse.ok && plan.state === 'SAFE') {
+        actions.appendChild(outputAction(detail.operation.type === 'undo' ? 'Redo' : 'Undo', 'confirm', () => confirmUndo(detail, plan)));
+      } else if (planResponse.ok && plan.state === 'CONFLICT') {
+        $('#outputText').textContent += `\n\nUNDO CONFLICT\n${plan.reason}`;
+      }
       actions.classList.add('open');
     } catch (error) {
       $('#outputTitle').textContent = 'History unavailable';
+      $('#outputText').textContent = error.message;
+    }
+  }
+
+  function confirmUndo(detail, plan) {
+    const verb = detail.operation.type === 'undo' ? 'Redo' : 'Undo';
+    $('#outputTitle').textContent = `Confirm ${verb}`;
+    const shown = plan.paths.slice(0, 12);
+    const remainder = plan.paths.length - shown.length;
+    $('#outputText').textContent = `${verb.toUpperCase()} run:${detail.runId}\n\n${plan.reason}\n\nFILES\n${shown.join('\n')}${remainder > 0 ? `\n… and ${remainder} more` : ''}\n\nThis creates a new recorded inverse operation. It does not erase history.`;
+    $('#outputResults').replaceChildren();
+    const actions = $('#outputActions');
+    actions.replaceChildren(
+      outputAction('Cancel', '', () => showHistoryDetail(detail.runId)),
+      outputAction(`Apply ${verb}`, 'confirm', () => executeUndo(detail.runId, verb)),
+    );
+    actions.classList.add('open');
+  }
+
+  async function executeUndo(runId, verb) {
+    const actions = $('#outputActions');
+    actions.replaceChildren();
+    actions.classList.remove('open');
+    $('#outputTitle').textContent = `${verb} running`;
+    $('#outputText').textContent = `Safely applying the recorded inverse for run:${runId}…`;
+    try {
+      const response = await fetch('/operations/undo', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId }),
+      });
+      const result = await response.json();
+      if (!response.ok) throw new Error(result.error || `${verb} failed with HTTP ${response.status}.`);
+      state = result.state;
+      $('#outputTitle').textContent = `${verb} ${result.status}`;
+      $('#outputText').textContent = `${result.operation.fileCount} files restored\n${(result.operation.durationMs / 1000).toFixed(1)}s\n\n${result.operation.paths.join('\n')}\n\nRaw evidence: run:${result.runId}`;
+      $('#snapshotState').textContent = state.git.head.slice(0, 7);
+      $('#snapshotState').className = state.git.dirty ? 'warn' : 'good';
+      $('#changeCount').textContent = String(state.git.changedFiles.length);
+      $('#changeCount').className = state.git.changedFiles.length ? 'warn' : 'good';
+      actions.replaceChildren(
+        outputAction('Copy handoff', '', copyHandoff),
+        outputAction('Refresh repository', 'confirm', () => window.location.reload()),
+      );
+      actions.classList.add('open');
+    } catch (error) {
+      $('#outputTitle').textContent = `${verb} refused`;
+      $('#outputText').textContent = error.message;
+    }
+  }
+
+  async function showLatestUndo() {
+    output.classList.add('open');
+    $('#outputTitle').textContent = 'Finding latest reversible operation';
+    $('#outputText').textContent = liveState ? 'Checking immutable history…' : 'Undo requires the live local HUD runtime.';
+    $('#outputResults').replaceChildren();
+    if (!liveState) return;
+    try {
+      const response = await fetch('/history?limit=25', { cache: 'no-store' });
+      const value = await response.json();
+      if (!response.ok) throw new Error(value.error || `History request failed with HTTP ${response.status}.`);
+      const latest = value.history.find((item) => item.reversible);
+      if (!latest) {
+        $('#outputTitle').textContent = 'Nothing to undo';
+        $('#outputText').textContent = 'No recorded operation has a content-level worktree change.';
+        return;
+      }
+      const [detailResponse, planResponse] = await Promise.all([
+        fetch(`/history/${encodeURIComponent(latest.runId)}`, { cache: 'no-store' }),
+        fetch(`/undo/${encodeURIComponent(latest.runId)}`, { cache: 'no-store' }),
+      ]);
+      const detail = await detailResponse.json();
+      const plan = await planResponse.json();
+      if (!detailResponse.ok || !planResponse.ok) throw new Error(detail.error || plan.error || 'Unable to prepare Undo.');
+      if (plan.state === 'SAFE') confirmUndo(detail, plan);
+      else {
+        $('#outputTitle').textContent = `Undo ${plan.state.toLowerCase()}`;
+        $('#outputText').textContent = `${plan.reason}\n\n${plan.paths.join('\n')}`;
+      }
+    } catch (error) {
+      $('#outputTitle').textContent = 'Undo unavailable';
       $('#outputText').textContent = error.message;
     }
   }
@@ -815,6 +901,7 @@
   });
   $('#refreshState').addEventListener('click', () => window.location.reload());
   $('#historyButton').addEventListener('click', showHistory);
+  $('#undoButton').addEventListener('click', showLatestUndo);
   $('#zoomIn').onclick = () => setZoom(camera.z * 1.15);
   $('#zoomOut').onclick = () => setZoom(camera.z * 0.87);
   $('#zoomReset').onclick = resetCamera;

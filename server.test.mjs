@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -21,7 +21,7 @@ function fixtureProject() {
   writeFileSync(join(root, 'media', 'tone.wav'), Buffer.from('RIFFtestWAVE'));
   writeFileSync(join(root, 'media', 'clip.mp4'), Buffer.from('test-mp4'));
   writeFileSync(join(root, 'media', 'clip.mov'), Buffer.from('test-mov'));
-  writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'console.log("100% tests passed, 0 tests failed out of 2")\n');
+  writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync(new URL("../media/generated.txt", import.meta.url), "created by command\\n"); console.log("100% tests passed, 0 tests failed out of 2")\n');
   execFileSync('git', ['init', '-b', 'main'], { cwd: root });
   execFileSync('git', ['config', 'user.email', 'hud@example.invalid'], { cwd: root });
   execFileSync('git', ['config', 'user.name', 'HUD Test'], { cwd: root });
@@ -187,4 +187,23 @@ test('HUD server exposes live reads, typed operations, and byte-range media with
   const historicalSource = await fetch(`${base}/source?path=${encodeURIComponent('media/tone.wav')}&context=0&run=${search.runId}`);
   assert.equal(historicalSource.status, 200);
   assert.equal((await historicalSource.json()).runId, search.runId);
+
+  const undoPreview = await (await fetch(`${base}/undo/${commandRunId}`)).json();
+  assert.equal(undoPreview.state, 'SAFE');
+  assert.deepEqual(undoPreview.paths, ['media/generated.txt']);
+  const undoResponse = await fetch(`${base}/operations/undo`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ runId: commandRunId }),
+  });
+  assert.equal(undoResponse.status, 200);
+  const undo = await undoResponse.json();
+  assert.equal(undo.operation.type, 'undo');
+  assert.equal(undo.operation.targetRunId, commandRunId);
+  assert.equal(existsSync(join(project.root, 'media', 'generated.txt')), false);
+  assert.equal((await (await fetch(`${base}/undo/${commandRunId}`)).json()).state, 'CONFLICT');
+  const repeatedUndo = await fetch(`${base}/operations/undo`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runId: commandRunId }),
+  });
+  assert.equal(repeatedUndo.status, 409);
+  assert.equal((await fetch(`${base}/undo/not-a-run`)).status, 404);
 });
