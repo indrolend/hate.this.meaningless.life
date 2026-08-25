@@ -4,7 +4,7 @@
 
 The current product runtime is `packages/commandhud/`. Do not begin new implementation in `legacy/commandhud/`, `packages/vscode-extension/`, `portable/`, or a selected project's copied `tools/hud` directory.
 
-The current convergence branch is `convergence/generic-commandhud-20260825`. Inspect Git status, branch, HEAD, and tests before changing it; source and runtime evidence override this handoff.
+The current product authority is the repository's `main` branch. Inspect Git status, branch, HEAD, and tests before changing it; source and runtime evidence override this handoff.
 
 ## Product contract
 
@@ -42,7 +42,7 @@ hud search currentState .
 Install directly from the current published branch when testing a clean machine:
 
 ```powershell
-npm install --global "git+https://github.com/indrolend/hate.this.meaningless.life.git#convergence/generic-commandhud-20260825"
+npm install --global "git+https://github.com/indrolend/hate.this.meaningless.life.git#main"
 ```
 
 ## Current boundaries
@@ -60,4 +60,4 @@ See `docs/MATERIAL-INVENTORY.md`. Historical prototypes remain for explicit beha
 
 ## Highest-leverage next decision
 
-The convergence branch is a direct descendant of `main` and can be reviewed as a fast-forward candidate. Before changing the default branch, verify remote ancestry and run the full suite from a clean clone. After that, decide whether the old VS Code and portable prototypes contain any still-desired unique contract; archive or remove them rather than leaving ambiguous parallel products.
+Decide whether the old VS Code and portable prototypes contain any still-desired unique contract; archive or remove them rather than leaving ambiguous parallel products. Keep current implementation work in `packages/commandhud/` and project-specific integrations in the projects that own them.
