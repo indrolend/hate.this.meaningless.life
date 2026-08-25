@@ -34,10 +34,14 @@ test('desktop host owns server and app-window lifetime', async () => {
   child.pid = 4242;
   child.exitCode = null;
   child.kill = () => { child.exitCode = 0; child.emit('exit', 0, null); };
-  const serverFactory = async () => ({
-    host: '127.0.0.1', port: 54321, recovery: { recovered: [], detached: [], corrupt: [] },
-    server: { close(callback) { serverClosed++; callback(); } },
-  });
+  let sessionChanged = null;
+  const serverFactory = async (_project, options) => {
+    sessionChanged = options.onSessionClientsChanged;
+    return {
+      host: '127.0.0.1', port: 54321, recovery: { recovered: [], detached: [], corrupt: [] },
+      server: { close(callback) { serverClosed++; callback(); } },
+    };
+  };
   const spawnImpl = (executable, args, options) => {
     launched = { executable, args, options };
     return child;
@@ -49,9 +53,14 @@ test('desktop host owns server and app-window lifetime', async () => {
   assert.ok(launched.args.includes('--app=http://127.0.0.1:54321/'));
   assert.ok(launched.args.some((value) => value.startsWith('--user-data-dir=')));
   assert.throws(() => acquireDesktopLock(project), /already active/);
+  const waiting = desktop.wait();
   child.exitCode = 0;
   child.emit('exit', 0, null);
-  assert.deepEqual(await desktop.wait(), { code: 0, signal: null });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(serverClosed, 0, 'Chromium bootstrap exit must not stop a connected desktop server');
+  sessionChanged(1);
+  sessionChanged(0);
+  assert.deepEqual(await waiting, { reason: 'renderer-closed' });
   assert.equal(serverClosed, 1);
   assert.equal(existsSync(join(project.store, 'desktop', `${project.key}.lock.json`)), false);
 });

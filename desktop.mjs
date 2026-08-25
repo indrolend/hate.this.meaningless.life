@@ -59,11 +59,27 @@ export async function startDesktopHud(project, {
   browserPath = null,
   spawnImpl = spawn,
   serverFactory = startHudServer,
+  rendererStartupMs = 15000,
+  rendererDisconnectMs = 750,
 } = {}) {
   const lock = acquireDesktopLock(project);
   let running = null;
   let child = null;
   let closed = false;
+  let rendererConnected = false;
+  let disconnectTimer = null;
+  let resolveRendererClosed;
+  const rendererClosed = new Promise((resolve) => { resolveRendererClosed = resolve; });
+  const onSessionClientsChanged = (count) => {
+    if (count > 0) {
+      rendererConnected = true;
+      if (disconnectTimer) clearTimeout(disconnectTimer);
+      disconnectTimer = null;
+      return;
+    }
+    if (!rendererConnected || disconnectTimer) return;
+    disconnectTimer = setTimeout(() => resolveRendererClosed({ reason: 'renderer-closed' }), rendererDisconnectMs);
+  };
   const close = async ({ terminateBrowser = false } = {}) => {
     if (closed) return;
     closed = true;
@@ -72,7 +88,9 @@ export async function startDesktopHud(project, {
     lock.release();
   };
   try {
-    running = await serverFactory(project, { host: '127.0.0.1', port: 0, terminal: true });
+    running = await serverFactory(project, {
+      host: '127.0.0.1', port: 0, terminal: true, onSessionClientsChanged,
+    });
     const executable = browserPath || findDesktopBrowser();
     if (!executable) throw new Error('CommandHUD desktop requires Microsoft Edge or Google Chrome on Windows.');
     const url = `http://${running.host}:${running.port}/`;
@@ -82,15 +100,21 @@ export async function startDesktopHud(project, {
       `--app=${url}`, `--user-data-dir=${profile}`, '--no-first-run',
       '--disable-background-mode', '--disable-features=msEdgeFirstRunExperience',
     ], { windowsHide: true, stdio: 'ignore' });
-    const exited = new Promise((resolveExit, rejectExit) => {
-      child.once('error', rejectExit);
+    const browserError = new Promise((_, rejectError) => child.once('error', rejectError));
+    const exited = new Promise((resolveExit) => {
       child.once('exit', (code, signal) => resolveExit({ code, signal }));
+    });
+    const failedToConnect = new Promise((resolveFailure) => {
+      const timer = setTimeout(() => {
+        if (!rendererConnected) resolveFailure({ reason: 'renderer-never-connected' });
+      }, rendererStartupMs);
+      timer.unref?.();
     });
     return {
       url, browser: executable, pid: child.pid, recovery: running.recovery,
       close,
       async wait() {
-        try { return await exited; }
+        try { return await Promise.race([rendererClosed, failedToConnect, browserError]); }
         finally { await close(); }
       },
     };

@@ -212,7 +212,7 @@ function sendFile(request, response, path, { cache = 'no-cache' } = {}) {
   else createReadStream(path).pipe(response);
 }
 
-export function createHudServer(project, { terminal = false } = {}) {
+export function createHudServer(project, { terminal = false, onSessionClientsChanged = null } = {}) {
   let activeOperation = null;
   let activeExecution = null;
   let terminalCwd = project.root;
@@ -262,9 +262,14 @@ export function createHudServer(project, { terminal = false } = {}) {
         });
         response.write(`event: connected\ndata: ${JSON.stringify({ type: 'connected', session: project.key, eventSequence })}\n\n`);
         eventClients.add(response);
+        onSessionClientsChanged?.(eventClients.size);
         const heartbeat = setInterval(() => response.write(': keepalive\n\n'), 15000);
         heartbeat.unref?.();
-        request.on('close', () => { clearInterval(heartbeat); eventClients.delete(response); });
+        request.on('close', () => {
+          clearInterval(heartbeat);
+          eventClients.delete(response);
+          onSessionClientsChanged?.(eventClients.size);
+        });
         return;
       }
       if (request.method === 'POST' && url.pathname === '/operations/search') {
@@ -470,7 +475,9 @@ export function createHudServer(project, { terminal = false } = {}) {
   });
 }
 
-export async function startHudServer(project, { host = '127.0.0.1', port = 8765, terminal = false } = {}) {
+export async function startHudServer(project, {
+  host = '127.0.0.1', port = 8765, terminal = false, onSessionClientsChanged = null,
+} = {}) {
   const recovery = await recoverInterruptedRuns(project);
   if (recovery.corrupt.length) {
     const run = recovery.corrupt[0];
@@ -480,7 +487,7 @@ export async function startHudServer(project, { host = '127.0.0.1', port = 8765,
     const run = recovery.detached[0];
     throw new Error(`A detached CommandHUD process still appears active for run ${run.runId}. Refusing to start another operation runtime.`);
   }
-  const server = createHudServer(project, { terminal });
+  const server = createHudServer(project, { terminal, onSessionClientsChanged });
   await new Promise((resolveListen, reject) => {
     server.once('error', reject);
     server.listen(port, host, resolveListen);

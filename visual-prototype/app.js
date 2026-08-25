@@ -32,6 +32,8 @@
   const filesByPath = new Map();
   const directoriesByPath = new Map();
   const layoutByPath = new Map();
+  let particleFrame = null;
+  let visibleParticles = [];
   const openDirectories = new Set(['']);
   const pointers = new Map();
   let currentDirectory = '';
@@ -202,7 +204,12 @@
   }
 
   function resetCamera() {
-    camera = { x: 48, y: 48, z: 0.92 };
+    const z = Math.max(.5, Math.min(1, (viewport.clientWidth - 34) / 1040, (viewport.clientHeight - 34) / 700));
+    camera = {
+      x: (viewport.clientWidth - 1040 * z) / 2,
+      y: (viewport.clientHeight - 700 * z) / 2,
+      z,
+    };
     applyCamera();
   }
 
@@ -259,57 +266,138 @@
     ];
   }
 
+  function filesInside(directory, result = []) {
+    result.push(...directory.files);
+    for (const child of directory.directories) filesInside(child, result);
+    return result;
+  }
+
+  function stableNumber(text, salt = 0) {
+    let value = 2166136261 ^ salt;
+    for (let index = 0; index < text.length; index++) {
+      value ^= text.charCodeAt(index);
+      value = Math.imul(value, 16777619);
+    }
+    return (value >>> 0) / 4294967295;
+  }
+
+  function drawParticleBlob(canvas, particles) {
+    if (particleFrame) cancelAnimationFrame(particleFrame);
+    const context = canvas.getContext('2d');
+    const ratio = Math.min(2, globalThis.devicePixelRatio || 1);
+    canvas.width = Math.round(900 * ratio);
+    canvas.height = Math.round(620 * ratio);
+    context.setTransform(ratio, 0, 0, ratio, 0, 0);
+    const reducedMotion = matchMedia('(prefers-reduced-motion: reduce)').matches;
+    const render = (time = 0) => {
+      context.clearRect(0, 0, 900, 620);
+      const glow = context.createRadialGradient(450, 310, 40, 450, 310, 245);
+      glow.addColorStop(0, '#4caf5422');
+      glow.addColorStop(.55, '#398f4110');
+      glow.addColorStop(1, '#17331b00');
+      context.fillStyle = glow;
+      context.fillRect(130, 70, 640, 480);
+      for (const particle of particles) {
+        const drift = reducedMotion ? 0 : Math.sin(time * .00055 + particle.phase) * particle.drift;
+        const x = particle.x + Math.cos(particle.phase) * drift;
+        const y = particle.y + Math.sin(particle.phase * 1.7) * drift;
+        particle.displayX = x;
+        particle.displayY = y;
+        const selectedParticle = selected?.path === particle.path;
+        context.beginPath();
+        context.arc(x, y, particle.size + (selectedParticle ? 2.2 : 0), 0, Math.PI * 2);
+        context.fillStyle = selectedParticle ? '#78d5e1' : particle.match ? '#dff59a' : particle.changed ? '#e1b87f' : particle.direct ? '#75d47d' : '#469e50';
+        context.shadowColor = selectedParticle ? '#78d5e1' : particle.match ? '#d4ec8e' : '#55ba5f';
+        context.shadowBlur = particle.match || selectedParticle ? 13 : particle.direct ? 5 : 2;
+        context.globalAlpha = particle.match || selectedParticle ? 1 : particle.direct ? .9 : .62;
+        context.fill();
+      }
+      context.globalAlpha = 1;
+      context.shadowBlur = 0;
+      particleFrame = requestAnimationFrame(render);
+    };
+    render();
+  }
+
   function renderMap() {
     const directory = directoriesByPath.get(currentDirectory) || repository.root;
     const items = directoryItems(directory);
-    const columns = Math.max(2, Math.min(5, Math.ceil(Math.sqrt(Math.max(items.length, 1) * 1.45))));
-    const cardWidth = 150;
-    const cardHeight = 66;
-    const gap = 22;
-    const regionWidth = Math.max(390, columns * (cardWidth + gap) + 34);
-    const rows = Math.max(1, Math.ceil(items.length / columns));
-    const regionHeight = Math.max(230, rows * (cardHeight + gap) + 88);
-    world.style.width = `${regionWidth + 160}px`;
-    world.style.height = `${regionHeight + 160}px`;
+    const allFiles = filesInside(directory);
+    world.style.width = '1040px';
+    world.style.height = '700px';
     world.innerHTML = '';
     layoutByPath.clear();
+    visibleParticles = allFiles.map((file) => {
+      const angle = stableNumber(file.path, 17) * Math.PI * 2;
+      const radius = Math.sqrt(stableNumber(file.path, 31)) * (188 + 22 * Math.sin(angle * 3 + stableNumber(file.path, 47) * 4));
+      const parent = file.path.includes('/') ? file.path.slice(0, file.path.lastIndexOf('/')) : '';
+      const particle = {
+        path: file.path,
+        x: 450 + Math.cos(angle) * radius * 1.12,
+        y: 310 + Math.sin(angle) * radius * .86,
+        size: parent === currentDirectory ? 3.2 : 1.35 + stableNumber(file.path, 61) * 1.4,
+        phase: stableNumber(file.path, 79) * Math.PI * 2,
+        drift: 1.2 + stableNumber(file.path, 97) * 2.4,
+        direct: parent === currentDirectory,
+        changed: Boolean(file.gitStatus),
+        match: searchFiles.has(file.path),
+      };
+      layoutByPath.set(file.path, { x: 70 + particle.x, y: 35 + particle.y });
+      return particle;
+    });
+    const canvas = document.createElement('canvas');
+    canvas.className = 'particle-field';
+    canvas.setAttribute('aria-label', `${allFiles.length} repository files represented as particles`);
+    world.appendChild(canvas);
+    drawParticleBlob(canvas, visibleParticles);
 
-    const region = document.createElement('section');
-    region.className = 'region';
-    region.style.cssText = `left:60px;top:60px;width:${regionWidth}px;height:${regionHeight}px;border-top-color:${palette[Math.abs(currentDirectory.length) % palette.length]}`;
+    const core = document.createElement('section');
+    core.className = 'repo-core';
+    const changed = allFiles.filter((file) => file.gitStatus).length;
+    const matches = allFiles.reduce((sum, file) => sum + (searchFiles.get(file.path)?.count || 0), 0);
+    core.innerHTML = `<span class="repo-core-kicker">${directory.path ? 'directory' : 'repository'}</span><strong class="repo-core-title">${directory.path || repository.root.name}</strong><span class="repo-core-meta">${allFiles.length} files in this scope<br>${directory.directories.length} immediate directories</span><span class="repo-core-status"><span><strong>${changed}</strong> changed</span><span><strong>${matches}</strong> matches</span></span>`;
+    world.appendChild(core);
+
     const parentPath = currentDirectory.includes('/') ? currentDirectory.slice(0, currentDirectory.lastIndexOf('/')) : '';
-    region.innerHTML = `<span class="region-title">${directory.path || repository.root.name}</span><span class="region-meta">${directory.directories.length} directories · ${directory.files.length} files</span>`;
     if (directory.path) {
       const back = document.createElement('button');
-      back.className = 'node';
+      back.className = 'hero-back';
       back.dataset.directory = parentPath;
-      back.style.cssText = 'left:18px;top:47px;width:70px;min-height:42px';
-      back.innerHTML = '<span class="node-name">← parent</span>';
-      region.appendChild(back);
+      back.textContent = '← parent';
+      world.appendChild(back);
     }
-
-    items.forEach((item, index) => {
-      const x = 18 + (index % columns) * (cardWidth + gap);
-      const y = 106 + Math.floor(index / columns) * (cardHeight + gap);
+    const shown = items.slice(0, 16);
+    shown.forEach((item, index) => {
+      const angle = -Math.PI / 2 + (index / Math.max(shown.length, 1)) * Math.PI * 2;
+      const x = 520 + Math.cos(angle) * 385 - 64;
+      const y = 350 + Math.sin(angle) * 282 - 20;
       const path = item.value.path;
-      layoutByPath.set(path, { x: 60 + x, y: 60 + y });
       const button = document.createElement('button');
-      button.className = `node${selected?.path === path ? ' selected' : ''}`;
-      button.style.cssText = `left:${x}px;top:${y}px;width:${cardWidth}px`;
+      button.className = `orbit-item${item.type === 'file' ? ' file' : ''}${selected?.path === path ? ' selected' : ''}`;
+      button.style.cssText = `left:${x}px;top:${y}px`;
       if (item.type === 'directory') {
         const matchCount = directorySearchCount(item.value);
         if (matchCount) button.classList.add('search-match');
         button.dataset.directory = path;
-        button.innerHTML = `<span class="node-name">▰ ${item.value.name}</span><span class="node-kind">${item.value.directories.length}d · ${item.value.files.length}f · ${descendants(item.value)} total${matchCount ? ` · ${matchCount} matches` : ''}</span>`;
+        button.innerHTML = `<span class="orbit-name">${item.value.name}</span><span class="orbit-meta">${descendants(item.value)} files${matchCount ? ` · ${matchCount} matches` : ''}</span>`;
       } else {
         const match = searchFiles.get(path);
         if (match) button.classList.add('search-match');
         button.dataset.file = path;
-        button.innerHTML = `<span class="node-name">${item.value.name}</span><span class="node-kind">${item.value.kind} · ${formatSize(item.value.size)}${match ? ` · ${match.count} matches` : ''}</span>${item.value.gitStatus ? '<span class="mark"></span>' : ''}`;
+        button.innerHTML = `<span class="orbit-name">${item.value.name}</span><span class="orbit-meta">${item.value.kind} · ${formatSize(item.value.size)}${match ? ` · ${match.count} matches` : ''}</span>`;
       }
-      region.appendChild(button);
+      world.appendChild(button);
     });
-    world.appendChild(region);
+    if (items.length > shown.length) {
+      const more = document.createElement('span');
+      more.className = 'orbit-more';
+      more.textContent = `+ ${items.length - shown.length} more immediate items in Explorer`;
+      world.appendChild(more);
+    }
+    const legend = document.createElement('div');
+    legend.className = 'particle-legend';
+    legend.innerHTML = '<span>file</span><span class="changed-key">changed</span><span class="match-key">search match</span>';
+    world.appendChild(legend);
     applyCamera();
   }
 
@@ -358,8 +446,8 @@
       const position = layoutByPath.get(path);
       if (position) {
         camera.z = 1.08;
-        camera.x = viewport.clientWidth / 2 - (position.x + 75) * camera.z;
-        camera.y = viewport.clientHeight / 2 - (position.y + 34) * camera.z;
+        camera.x = viewport.clientWidth / 2 - position.x * camera.z;
+        camera.y = viewport.clientHeight / 2 - position.y * camera.z;
         applyCamera();
       }
     }
@@ -1099,9 +1187,23 @@
 
   world.addEventListener('click', (event) => {
     const button = event.target.closest('button');
-    if (!button) return;
-    if (button.dataset.directory !== undefined) enterDirectory(button.dataset.directory);
-    else if (button.dataset.file) openFile(button.dataset.file);
+    if (button) {
+      if (button.dataset.directory !== undefined) enterDirectory(button.dataset.directory);
+      else if (button.dataset.file) openFile(button.dataset.file);
+      return;
+    }
+    const canvas = event.target.closest('.particle-field');
+    if (!canvas) return;
+    const bounds = canvas.getBoundingClientRect();
+    const x = (event.clientX - bounds.left) * 900 / bounds.width;
+    const y = (event.clientY - bounds.top) * 620 / bounds.height;
+    let nearest = null;
+    let distance = 10;
+    for (const particle of visibleParticles) {
+      const candidate = Math.hypot(x - particle.displayX, y - particle.displayY);
+      if (candidate < distance) { nearest = particle; distance = candidate; }
+    }
+    if (nearest) openFile(nearest.path);
   });
 
   viewport.addEventListener('pointerdown', (event) => {
@@ -1250,6 +1352,7 @@
 
   renderTree();
   renderMap();
+  resetCamera();
   renderPicker();
   if (window.innerWidth <= 640) {
     app.classList.add('tree-closed');
