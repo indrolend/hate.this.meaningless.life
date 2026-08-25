@@ -40,7 +40,6 @@ Each record carries project identity, root, branch, commit, command, exit status
 | --- | --- |
 | `packages/commandhud/` | current product authority |
 | root `hud.cmd` and `CommandHUD*.cmd` | current Windows front doors |
-| `legacy/commandhud/` | original Windows GUI behavioral reference |
-| `packages/vscode-extension/` | separate project/order prototype |
+| `docs/PROTOTYPE-RETIREMENT-AUDIT.md` | behavioral accounting for removed prototype lineages |
 
-Legacy material may be removed only after a tested current equivalent exists or its unique behavior is explicitly rejected.
+Retired source remains available through Git history. Do not restore it to the active tree unless a demonstrated current contract cannot be implemented through the canonical runtime.

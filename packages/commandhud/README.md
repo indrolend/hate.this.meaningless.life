@@ -36,9 +36,9 @@ This is the first thin Windows host, not the final packaged `CommandHUD.exe`. It
 
 ### Historical prototype relationship
 
-The earlier Windows Forms prototype remains at `../../legacy/commandhud/CommandHud-v21-corebridge.ps1`. It established useful interaction behavior: persistent cwd, focused command input, Enter-to-run, streaming output, Stop, copy, and local command recall. Those are product references, not a second authority.
+The earlier Windows Forms prototype established useful interaction behavior: persistent cwd, focused command input, Enter-to-run, streaming output, Stop, copy, and local command recall. The current core supersedes its session JSONL/log ownership and PowerShell-runspace execution with verified repository identity, immutable runs, typed browser operations, evidence currency, cancellation, recovery, and Undo.
 
-The current core supersedes the prototype's session JSONL/log ownership and PowerShell-runspace execution with verified repository identity, immutable runs, typed browser operations, evidence currency, cancellation, recovery, and Undo. The desktop launcher does not invoke or copy the legacy execution layer.
+That prototype was removed from the active tree after behavioral accounting. See `../../docs/PROTOTYPE-RETIREMENT-AUDIT.md`; Git history preserves its exact implementation.
 
 ## Workflow
 
@@ -270,14 +270,6 @@ Recovery validates the journal schema, project/run identity, process and command
 In the live renderer, submitting Search sends structured `query` and `scope` JSON rather than a command string. The runtime validates it, runs `rg` directly without a shell, records the evidence, and returns refreshed semantic state. Snapshot mode keeps the same Search controls but only copies the equivalent CLI command without claiming execution.
 
 The visual renderer receives state only from the live local runtime started by `hud desktop` or `hud serve`. It does not write machine-specific snapshots into the selected repository. Opening the renderer as a standalone static page shows an explicit disconnected state and cannot stream repository media or execute operations. The static command bar may stage and copy exact `hud` commands, but it never claims execution.
-
-## Historical Windows CommandHUD bridge
-
-The retained bridge lives at `../../legacy/commandhud/CommandHud-v21-corebridge.ps1` and is no longer the primary entrypoint.
-
-It remains behavioral evidence for the old Windows Forms interaction model. New execution, evidence, reduction, and presentation work belongs in this package.
-
-Important cwd contract: commands execute in a child PowerShell process, which records its final working directory for the parent runspace. Preserve that handoff when changing command transport.
 
 ## Continue from here
 

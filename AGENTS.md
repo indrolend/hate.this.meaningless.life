@@ -18,9 +18,7 @@
 ## Implementation authority
 
 - Treat `packages/commandhud/` as the current product runtime and test authority.
-- Treat `legacy/commandhud/CommandHud-v21.ps1` as behavioral evidence for the original Windows command surface, not an active launcher.
-- Treat `packages/vscode-extension/` as a retained project/order prototype, not current execution authority.
-- The historical portable VS Code bootstrap was removed as superseded distribution code; use Git history if its implementation evidence is needed.
+- Earlier Windows Forms, DataFactory/VS Code, and portable bootstrap implementations were retired after behavioral accounting. Use `docs/PROTOTYPE-RETIREMENT-AUDIT.md` and Git history when that lineage matters; do not recreate parallel runtime or frontend authority.
 - Keep repository-specific scripts and typed command declarations in their repository; do not copy the generic HUD runtime into projects it operates on.
 
 ## Required change workflow

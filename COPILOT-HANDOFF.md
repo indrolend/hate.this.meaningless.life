@@ -2,7 +2,7 @@
 
 ## Authority
 
-The current product runtime is `packages/commandhud/`. Do not begin new implementation in `legacy/commandhud/`, `packages/vscode-extension/`, or a selected project's copied `tools/hud` directory.
+The current product runtime is `packages/commandhud/`. Do not recreate retired Windows Forms, DataFactory/VS Code, portable bootstrap, or selected-project copied HUD implementations.
 
 The current product authority is the repository's `main` branch. Inspect Git status, branch, HEAD, and tests before changing it; source and runtime evidence override this handoff.
 
@@ -56,8 +56,8 @@ npm install --global "git+https://github.com/indrolend/hate.this.meaningless.lif
 
 ## Historical material
 
-See `docs/MATERIAL-INVENTORY.md`. Historical prototypes remain for explicit behavioral accounting, not because they are active access points.
+See `docs/MATERIAL-INVENTORY.md` and `docs/PROTOTYPE-RETIREMENT-AUDIT.md`. Historical source remains in Git rather than as parallel runnable systems in the active tree.
 
 ## Highest-leverage next decision
 
-Decide whether the old VS Code order model contains a still-desired unique contract and whether the Windows Forms reference still adds present-day utility. Keep current implementation work in `packages/commandhud/` and project-specific integrations in the projects that own them.
+Keep current implementation work in `packages/commandhud/` and project-specific integrations in the projects that own them. The next product frontier should be selected from observed user friction, not from unretired prototype sediment.

@@ -15,7 +15,7 @@ CommandHUD runs real commands inside a verified Git repository, preserves comple
 - Search, operation history, safe worktree Undo, and command discovery;
 - the terminal UI, local desktop host, and visual repository client.
 
-`legacy/` and `packages/vscode-extension/` are retained behavioral references. They are not current execution authority. The superseded portable VS Code distribution was removed after its behavior was accounted for; Git history retains it.
+Earlier Windows Forms, DataFactory/VS Code, and portable distribution prototypes were removed after their behavior was accounted for. Git history retains their exact source; [the retirement audit](docs/PROTOTYPE-RETIREMENT-AUDIT.md) records what was adopted, superseded, or deliberately rejected.
 
 ## Requirements
 
