@@ -24,4 +24,8 @@ test('visual HUD exposes one main menu over one command directory', () => {
   assert.match(app, /new EventSource\('\/events'\)/);
   assert.match(app, /'\/session\/navigation'/);
   assert.match(app, /synchronizeState/);
+  assert.doesNotMatch(html, /hud-state\.js/);
+  assert.doesNotMatch(app, /tools\/hud/);
+  assert.match(app, /hud desktop/);
+  assert.match(app, /hud serve/);
 });

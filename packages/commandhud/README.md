@@ -162,13 +162,13 @@ The renderer consumes the same repository projection exposed by `hud state --jso
 Inspect the projection without dumping every path:
 
 ```text
-node tools/hud/cli.mjs tree
+hud tree
 ```
 
 Start the local adapter and open the local page:
 
 ```powershell
-node tools/hud/cli.mjs serve
+hud serve
 ```
 
 Open `http://127.0.0.1:8765/`. The tree and map consume one projection. The map progressively displays the repository root, a selected directory, and that directory's immediate children. File focus displays only mechanically derived type, size, path, and Git state.
@@ -202,9 +202,9 @@ File focus uses native browser controls to preview projected MP4, MOV, WebM, MP3
 Search is a recorded development operation backed by the installed `rg` executable. It uses literal matching, preserves exact stdout and stderr in the immutable run directory, and derives both human and JSON views from the same structured operation record:
 
 ```powershell
-node tools/hud/cli.mjs search currentState tools/hud
-node tools/hud/cli.mjs search --json currentState tools/hud
-node tools/hud/cli.mjs handoff --copy
+hud search currentState packages/commandhud
+hud search --json currentState packages/commandhud
+hud handoff --copy
 ```
 
 `rg` exit code 1 is represented truthfully as a successful zero-match search. Missing tools are blocked and other search-tool failures remain failed. The compact handoff lists the repository, branch, scope, exact command, factual file/line counts, and the immutable run ID and raw evidence paths. The live map reads `lastOperation` from `currentState()` and highlights those same paths; it does not infer dependencies or file meaning.
@@ -219,7 +219,7 @@ The visual command bar has two explicit modes. Terminal is the default: in the t
 
 The single main HUD menu combines workspace actions, Search, Git helpers, selection tools, and the Library derived from `discoverCommands()` in the same live or snapshot state as the repository map. It lists the current repository's declared package scripts and factual command adapters instead of maintaining another curated command list. Section headings organize one searchable directory; they are not separate menus. Selecting a command stages its exact text in Terminal mode for inspection or editing and does not grant the browser arbitrary execution.
 
-In live mode, a Library entry can be run only after an explicit confirmation that shows the resolved command and warns that repository commands can execute arbitrary local code. The renderer submits the stable discovered identity, such as `npm:hud:test`, rather than executable text. The runtime rediscovers that identity, executes its runtime-owned argument vector without a shell, and records the resolved command, status, duration, reduction, Git state, stdout, and stderr through the existing immutable run system. The same operation is available directly as `node tools/hud/cli.mjs repository-command npm:hud:test`. Static mode remains staging-only.
+In live mode, a Library entry can be run only after an explicit confirmation that shows the resolved command and warns that repository commands can execute arbitrary local code. The renderer submits the stable discovered identity, such as `npm:test`, rather than executable text. The runtime rediscovers that identity, executes its runtime-owned argument vector without a shell, and records the resolved command, status, duration, reduction, Git state, stdout, and stderr through the existing immutable run system. The same operation is available directly as `hud repository-command npm:test`. Static mode remains staging-only.
 
 ## Immutable operation history
 
@@ -233,7 +233,7 @@ Repository-command runs capture their own content-level worktree delta as a full
 
 Undo is a new forward operation: it runs the recorded inverse, captures its own inverse delta, and writes another immutable evidence record. Undoing that Undo provides a factual Redo. If later content overlaps the recorded patch, `git apply --reverse --check` classifies the plan as `CONFLICT` and no mutation is attempted. Read-only and no-change operations report `NO_CHANGE`. This initial boundary restores worktree content only; it does not rewrite commits, reverse pushes, or claim to compensate for external effects.
 
-CLI parity is available through `node tools/hud/cli.mjs undo-plan <runId>` and `node tools/hud/cli.mjs undo <runId>`. Both derive the action from the runtime-owned immutable record; neither accepts a patch from the caller.
+CLI parity is available through `hud undo-plan <runId>` and `hud undo <runId>`. Both derive the action from the runtime-owned immutable record; neither accepts a patch from the caller.
 
 ## Runtime serialization and bounded evidence
 
@@ -269,7 +269,7 @@ Recovery validates the journal schema, project/run identity, process and command
 
 In the live renderer, submitting Search sends structured `query` and `scope` JSON rather than a command string. The runtime validates it, runs `rg` directly without a shell, records the evidence, and returns refreshed semantic state. Snapshot mode keeps the same Search controls but only copies the equivalent CLI command without claiming execution.
 
-`hud visual-state` remains a compatibility path for static hosting. It writes ignored `hud-state.js`, which contains machine-specific paths and transient Git state. Static mode can navigate that snapshot but cannot stream repository media. The browser command bar stages and copies exact commands; actual command execution remains owned by the CLI and Windows bridge.
+The visual renderer receives state only from the live local runtime started by `hud desktop` or `hud serve`. It does not write machine-specific snapshots into the selected repository. Opening the renderer as a standalone static page shows an explicit disconnected state and cannot stream repository media or execute operations. The static command bar may stage and copy exact `hud` commands, but it never claims execution.
 
 ## Historical Windows CommandHUD bridge
 

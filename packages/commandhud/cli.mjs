@@ -1,7 +1,6 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
-import { readFileSync, writeFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readFileSync } from 'node:fs';
 import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildOperationContext, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 function parse(argv) {
@@ -122,15 +121,6 @@ async function main() {
     for (const directory of value.root.directories) {
       console.log(`${directory.path} ${directory.directories.length}d ${directory.files.length}f`);
     }
-    return;
-  }
-  if (command === 'visual-state') {
-    const value = await currentState(project);
-    const target = join(project.root, 'tools', 'hud', 'visual-prototype', 'hud-state.js');
-    writeFileSync(target, `window.commandHudRealState = ${JSON.stringify(value, null, 2)};\n`);
-    console.log(`VISUAL_STATE=${target}`);
-    console.log(`FILES=${value.repository.fileCount}`);
-    console.log(`DIRECTORIES=${value.repository.directoryCount}`);
     return;
   }
   if (command === 'desktop') {

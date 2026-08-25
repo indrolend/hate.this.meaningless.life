@@ -54,8 +54,8 @@
       ['Copy last handoff', 'Copy compact context for the last structured operation.', '', 'evidence', null, 'handoff'],
     ],
     Repository: [
-      ['Current semantic state', 'Inspect the complete derived HUD snapshot.', 'node tools/hud/cli.mjs state --json', 'HUD'],
-      ['Repository tree', 'Inspect the Git-backed repository projection.', 'node tools/hud/cli.mjs tree', 'HUD'],
+      ['Current semantic state', 'Inspect the complete derived HUD snapshot.', 'hud state --json', 'HUD'],
+      ['Repository tree', 'Inspect the Git-backed repository projection.', 'hud tree', 'HUD'],
     ],
     Search: [
       ['Search repository', 'Run a recorded literal search across the repository.', 'search "" .', 'repository', null, 'search-repository'],
@@ -223,7 +223,7 @@
   }
 
   function renderMissingState() {
-    world.innerHTML = '<section class="focus open" style="position:absolute;left:40px;top:40px;transform:none;max-width:620px"><h2 class="focus-title">Repository snapshot required</h2><p class="focus-summary">Run <code>node tools/hud/cli.mjs visual-state</code> from the repository, then refresh this page.</p></section>';
+    world.innerHTML = '<section class="focus open" style="position:absolute;left:40px;top:40px;transform:none;max-width:620px"><h2 class="focus-title">Live repository connection required</h2><p class="focus-summary">Open this view through <code>hud desktop</code> or <code>hud serve</code>. A standalone static page cannot claim current repository state.</p></section>';
     $('#snapshotState').textContent = 'missing';
     $('#snapshotState').className = 'warn';
   }
@@ -632,7 +632,7 @@
         $('#outputTitle').textContent = 'Complete the Search request';
         $('#outputText').textContent = inputMode === 'search'
           ? 'Enter the literal text to find, then choose Repository or Current Directory.'
-          : 'Enter a query in quotes, followed by a repository scope.\n\nExample: search "current state" tools/hud';
+          : 'Enter a query in quotes, followed by a repository scope.\n\nExample: search "current state" .';
         $('#outputResults').replaceChildren();
       }
       return;
@@ -702,7 +702,7 @@
   }
 
   async function copyHandoff() {
-    if (!liveState) return stageCommand('node tools/hud/cli.mjs handoff --copy');
+    if (!liveState) return stageCommand('hud handoff --copy');
     output.classList.add('open');
     $('#outputActions').replaceChildren();
     $('#outputActions').classList.remove('open');
@@ -1303,7 +1303,7 @@
       ? input.value.trim() ? { query: input.value, scope: $('#searchScope').value || '.' } : null
       : typedSearch(input.value);
     if (liveState && operation) await executeSearch(operation);
-    else if (!liveState && operation) await stageCommand(`node tools/hud/cli.mjs search ${JSON.stringify(operation.query)} ${operation.scope}`);
+    else if (!liveState && operation) await stageCommand(`hud search ${JSON.stringify(operation.query)} ${operation.scope}`);
     else if (runtime?.capabilities?.terminal && input.value.trim()) await executeTerminalCommand(input.value);
     else await stageCommand(input.value);
   };
