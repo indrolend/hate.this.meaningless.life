@@ -243,7 +243,7 @@ History can display raw stdout and stderr through `GET /history/:runId/evidence/
 
 The main HUD menu mechanically groups package scripts by their colon-separated namespace, including HUD, Android, Native, LG, and maintenance-related groups. Unnamespaced scripts and factual repository adapters remain in General and Tools. Typing searches across every section. Undo, immutable History, Refresh, and compact handoff also live in this same menu instead of occupying separate header menus or buttons. These groups are derived from `currentState().commands`; they do not introduce a second command catalog.
 
-Package scripts are discovered automatically. A project can add typed commands through `commandHud.commands` in its selected project manifest. Each declaration supplies a stable name, inspectable display command, exact argument vector, and optional repository-relative owner path. Missing owners are omitted; malformed, duplicate, or escaping declarations fail closed.
+Package scripts are discovered automatically. A project can add typed commands through `commandHud.commands` in its selected project manifest. Each declaration supplies a stable name, inspectable display command, exact argument vector, and optional repository-relative owner path. Optional `kind` values select generic test/audit/smoke reduction; literal `successMarkers` add a bounded summary only on exit 0. Missing owners are omitted; malformed, duplicate, or escaping declarations fail closed.
 
 ## Live command lifecycle and cancellation
 

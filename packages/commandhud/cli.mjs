@@ -252,8 +252,8 @@ async function main() {
     return options.json ? console.log(JSON.stringify(value, null, 2)) : renderContinue(value);
   }
   if (command === 'objective' || command === 'frontier') {
-    if (args[0] === '--clear') setWorkingValue(project, command, null, await repositoryCurrency(project.root));
-    else if (args.length) setWorkingValue(project, command, args.join(' '), await repositoryCurrency(project.root));
+    if (args[0] === '--clear') setWorkingValue(project, command, null, await repositoryCurrency(project.root, project.identity.id));
+    else if (args.length) setWorkingValue(project, command, args.join(' '), await repositoryCurrency(project.root, project.identity.id));
     const value = workingValue(project, command);
     return options.json ? console.log(JSON.stringify(value, null, 2)) : console.log(`${command.toUpperCase()}=${value?.value || 'none'}`);
   }

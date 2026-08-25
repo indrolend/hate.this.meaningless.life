@@ -30,7 +30,7 @@ test('repository command discovery derives a deterministic inspectable library',
   mkdirSync(join(root, 'tools'));
   writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), '');
   writeFileSync(join(root, 'commandhud.project.json'), JSON.stringify({ id: 'fixture/commands', commandHud: { commands: [
-    { name: 'native-tests', command: 'node tools/run-native-tests.mjs', argv: ['node', 'tools/run-native-tests.mjs'], owner: 'tools/run-native-tests.mjs' },
+    { name: 'native-tests', command: 'node tools/run-native-tests.mjs', argv: ['node', 'tools/run-native-tests.mjs'], owner: 'tools/run-native-tests.mjs', kind: 'test' },
   ] } }));
   assert.deepEqual(discoverCommands(root), [
     { name: 'npm:build', command: 'npm run build' },
@@ -48,6 +48,12 @@ test('repository command declarations fail closed when malformed, duplicate, or 
   writeCommands([{ name: 'broken', command: '', argv: [] }]);
   assert.throws(() => discoverCommands(root), /Invalid CommandHUD command declaration/);
 
+  writeCommands([{ name: 'marker', command: 'node marker.mjs', argv: ['node', 'marker.mjs'], successMarkers: [{ contains: '', summary: 'pass' }] }]);
+  assert.throws(() => discoverCommands(root), /Invalid CommandHUD success marker declaration/);
+
+  writeCommands([{ name: 'kind', command: 'node kind.mjs', argv: ['node', 'kind.mjs'], kind: 'build' }]);
+  assert.throws(() => discoverCommands(root), /Invalid CommandHUD command kind/);
+
   writeCommands([{ name: 'npm:test', command: 'node other.mjs', argv: ['node', 'other.mjs'] }]);
   assert.throws(() => discoverCommands(root), /Duplicate repository command identity/);
 
@@ -61,7 +67,7 @@ test('repository command execution resolves a current discovered identity and re
   writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync(new URL("../file.txt", import.meta.url), "changed by command\\n"); console.log("100% tests passed, 0 tests failed out of 3")\n');
   const identityPath = join(root, 'distribution', 'project.json');
   const identity = JSON.parse(readFileSync(identityPath, 'utf8'));
-  identity.commandHud = { commands: [{ name: 'native-tests', command: 'node tools/run-native-tests.mjs', argv: ['node', 'tools/run-native-tests.mjs'], owner: 'tools/run-native-tests.mjs' }] };
+  identity.commandHud = { commands: [{ name: 'native-tests', command: 'node tools/run-native-tests.mjs', argv: ['node', 'tools/run-native-tests.mjs'], owner: 'tools/run-native-tests.mjs', kind: 'test' }] };
   writeFileSync(identityPath, JSON.stringify(identity));
   execFileSync('git', ['add', 'tools/run-native-tests.mjs', 'distribution/project.json'], { cwd: root });
   execFileSync('git', ['commit', '-m', 'add command fixture'], { cwd: root });
@@ -123,7 +129,7 @@ test('repository command cancellation preserves partial changes and reversible e
   writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync(new URL("../partial.txt", import.meta.url), "partial\\n"); await new Promise((resolve) => setTimeout(resolve, 5000));\n');
   const identityPath = join(root, 'distribution', 'project.json');
   const identity = JSON.parse(readFileSync(identityPath, 'utf8'));
-  identity.commandHud = { commands: [{ name: 'native-tests', command: 'node tools/run-native-tests.mjs', argv: ['node', 'tools/run-native-tests.mjs'], owner: 'tools/run-native-tests.mjs' }] };
+  identity.commandHud = { commands: [{ name: 'native-tests', command: 'node tools/run-native-tests.mjs', argv: ['node', 'tools/run-native-tests.mjs'], owner: 'tools/run-native-tests.mjs', kind: 'test' }] };
   writeFileSync(identityPath, JSON.stringify(identity));
   execFileSync('git', ['add', 'tools/run-native-tests.mjs', 'distribution/project.json'], { cwd: root });
   execFileSync('git', ['commit', '-m', 'add cancellable fixture'], { cwd: root });
@@ -291,10 +297,9 @@ test('reducers accept evidence from matching authoritative commands', () => {
     reduceOutput('ctest --output-on-failure', '100% tests passed, 0 tests failed out of 9', '', 0).summary,
     ['9/9 CTest'],
   );
-  assert.deepEqual(
-    reduceOutput('python tools/verify_asset_mirrors.py', 'ASSET_MIRRORS=PASS count=7', '', 0).summary,
-    ['asset mirrors'],
-  );
+  assert.deepEqual(reduceOutput('python tools/verify_asset_mirrors.py', 'ASSET_MIRRORS=PASS count=7', '', 0, {
+    successMarkers: [{ contains: 'ASSET_MIRRORS=PASS', summary: 'asset mirrors' }],
+  }).summary, ['asset mirrors']);
 });
 
 test('run records preserve human request separately from transport', async () => {

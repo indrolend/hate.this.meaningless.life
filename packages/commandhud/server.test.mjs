@@ -21,6 +21,7 @@ function fixtureProject() {
       command: 'node tools/run-native-tests.mjs',
       argv: ['node', 'tools/run-native-tests.mjs'],
       owner: 'tools/run-native-tests.mjs',
+      kind: 'test',
     }] },
   }));
   writeFileSync(join(root, 'media', 'tone.mp3'), Buffer.from([0x49, 0x44, 0x33, 1, 2, 3, 4, 5]));

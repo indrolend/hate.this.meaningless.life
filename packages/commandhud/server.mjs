@@ -168,7 +168,7 @@ async function sourceExcerpt(project, requested, context = 2, runId = null) {
   });
   return {
     path, query: record.operation.query, runId: record.id,
-    evidence: classifyEvidence(record.currencyAfter, await repositoryCurrency(project.root)),
+    evidence: classifyEvidence(record.currencyAfter, await repositoryCurrency(project.root, project.identity.id)),
     excerpts,
   };
 }

@@ -92,14 +92,17 @@ Projects may expose additional typed commands without changing CommandHUD:
         "name": "verify-assets",
         "command": "python tools/verify_assets.py",
         "argv": ["python", "tools/verify_assets.py"],
-        "owner": "tools/verify_assets.py"
+        "owner": "tools/verify_assets.py",
+        "successMarkers": [
+          {"contains": "ASSETS=PASS", "summary": "assets verified"}
+        ]
       }
     ]
   }
 }
 ```
 
-The browser requests the stable `name`; the runtime rereads the repository declaration, validates its owner path, and executes the recorded `argv`. It does not accept browser-supplied shell text.
+The browser requests the stable `name`; the runtime rereads the repository declaration, validates its owner path, and executes the recorded `argv`. It does not accept browser-supplied shell text. Optional `kind` values (`test`, `audit`, or `smoke`) select a generic reducer. Literal success markers add project-owned factual summaries only after exit 0.
 
 CommandHUD refuses execution outside a Git repository unless an explicit `--root` selects one.
 

@@ -253,7 +253,7 @@ export async function repositoryTree(root) {
   };
 }
 
-export async function repositoryCurrency(root) {
+export async function repositoryCurrency(root, projectId = null) {
   const snapshot = await gitSnapshot(root);
   const files = await exec('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], root);
   if (!files.ok) throw new Error(`Unable to enumerate repository currency: ${files.stderr}`);
@@ -266,7 +266,7 @@ export async function repositoryCurrency(root) {
     hash.update('\0');
   }
   return {
-    project: 'indrolend/data', root: resolve(root), head: snapshot.head,
+    project: projectId || readJson(projectIdentityPath(root))?.id || `local/${basename(root)}`, root: resolve(root), head: snapshot.head,
     worktreeFingerprint: `sha256:${hash.digest('hex')}`,
   };
 }
@@ -297,7 +297,7 @@ function meaningfulRun(record) {
 }
 
 export async function continuation(project, limit = 10) {
-  const [git, currency] = await Promise.all([gitSnapshot(project.root), repositoryCurrency(project.root)]);
+  const [git, currency] = await Promise.all([gitSnapshot(project.root), repositoryCurrency(project.root, project.identity.id)]);
   const state = readProjectState(project);
   const runs = listRuns(project, limit).filter(meaningfulRun);
   const recentEvidence = runs.map((record) => ({
@@ -336,9 +336,17 @@ function repositoryCommandDefinitions(root) {
     const command = typeof entry?.command === 'string' ? entry.command.trim() : '';
     const argv = entry?.argv;
     const owner = typeof entry?.owner === 'string' ? entry.owner.replaceAll('\\', '/') : null;
+    const successMarkers = entry?.successMarkers || [];
+    const kind = entry?.kind || null;
     if (!/^[a-z0-9][a-z0-9:._-]*$/i.test(name) || !command || !Array.isArray(argv) || !argv.length || argv.some((value) => typeof value !== 'string' || !value)) {
       throw new Error(`Invalid CommandHUD command declaration: ${name || '(unnamed)'}`);
     }
+    if (!Array.isArray(successMarkers) || successMarkers.some((marker) =>
+      typeof marker?.contains !== 'string' || !marker.contains || marker.contains.length > 200 ||
+      typeof marker?.summary !== 'string' || !marker.summary || marker.summary.length > 120)) {
+      throw new Error(`Invalid CommandHUD success marker declaration: ${name}`);
+    }
+    if (kind !== null && !['test', 'audit', 'smoke'].includes(kind)) throw new Error(`Invalid CommandHUD command kind: ${name}`);
     if (owner) {
       const ownerPath = resolve(root, owner);
       const ownerRelative = relative(root, ownerPath);
@@ -348,7 +356,7 @@ function repositoryCommandDefinitions(root) {
       if (!existsSync(ownerPath)) continue;
     }
     if (commands.some((item) => item.name === name)) throw new Error(`Duplicate repository command identity: ${name}`);
-    commands.push({ name, command, argv: [...argv] });
+    commands.push({ name, command, argv: [...argv], kind, successMarkers: successMarkers.map((marker) => ({ contains: marker.contains, summary: marker.summary })) });
   }
   return commands;
 }
@@ -436,15 +444,13 @@ function normalizeTerminalText(value, root = '') {
   return output.join('\n').trim();
 }
 
-export function reduceOutput(command, stdout, stderr, exitCode, { root = '' } = {}) {
+export function reduceOutput(command, stdout, stderr, exitCode, { root = '', kind = null, successMarkers = [] } = {}) {
   const text = normalizeTerminalText(`${stdout}\n${stderr}`, root);
   const summary = [];
   const commandText = String(command || '');
-  const testCommand = /(?:^|[\s"])(?:ctest|npm(?:\.cmd)?\s+(?:run\s+)?(?:test|hud:test)|node(?:\.exe)?\s+[^\r\n]*run-native-tests|verify-gameplay)/i.test(commandText);
-  const auditCommand = /npm(?:\.cmd)?\s+audit/i.test(commandText);
-  const assetCommand = /verify_asset_mirrors\.py|npm(?:\.cmd)?\s+(?:run\s+)?assets/i.test(commandText);
-  const smokeCommand = /(?:smoke-test|desktop-smoke|room-smoke)/i.test(commandText);
-  const multiplayerCommand = /multiplayer|MULTIPLAYER_PROTOCOL/i.test(commandText);
+  const testCommand = kind === 'test' || /(?:^|[\s"])(?:ctest|npm(?:\.cmd)?\s+(?:run\s+)?(?:test|hud:test))/i.test(commandText);
+  const auditCommand = kind === 'audit' || /npm(?:\.cmd)?\s+audit/i.test(commandText);
+  const smokeCommand = kind === 'smoke' || /(?:smoke-test|desktop-smoke|room-smoke)/i.test(commandText);
   const ctest = text.match(/(\d+)% tests passed(?:,\s*(\d+) tests failed)? out of (\d+)/i);
   if (ctest && testCommand) {
     const total = Number(ctest[3]);
@@ -456,9 +462,10 @@ export function reduceOutput(command, stdout, stderr, exitCode, { root = '' } = 
   const vitest = text.match(/Test Files\s+(\d+) passed[\s\S]*?Tests\s+(\d+) passed/i);
   if (vitest && testCommand) summary.push(`${vitest[1]} Vitest files, ${vitest[2]} tests`);
   if (auditCommand && /found 0 vulnerabilities/i.test(text)) summary.push('audit 0 vulnerabilities');
-  if (assetCommand && /ASSET_MIRRORS=PASS/i.test(text)) summary.push('asset mirrors');
   if (smokeCommand && /SMOKE_TEST_OK/i.test(text)) summary.push('smoke test');
-  if (multiplayerCommand && /MULTIPLAYER_PROTOCOL_OK/i.test(text)) summary.push('multiplayer protocol');
+  if (exitCode === 0) {
+    for (const marker of successMarkers) if (text.includes(marker.contains) && !summary.includes(marker.summary)) summary.push(marker.summary);
+  }
   const cause = exitCode === 0 ? null : firstMatch(text, [
     /[^\r\n]*(?:fatal|error|failed|exception|not found|is not recognized|cannot find)[^\r\n]*/i,
     /[^\r\n]*(?:FAIL|FAILED)[^\r\n]*/i,
@@ -535,13 +542,13 @@ export async function runCommand(project, tokens, {
   objective, stream = true, request = null, workflow = null,
   acceptedExitCodes = [0], operationReducer = null, shell = true, captureDelta = false,
   signal = null, onStart = null, onOutput = null, operationIdentity = null,
-  cwd = project.root, displayCommand = null,
+  cwd = project.root, displayCommand = null, reductionKind = null, successMarkers = [],
 } = {}) {
   if (!tokens.length) throw new Error('hud run requires a command.');
   const transportCommand = tokens.map((token) => /[\s"']/.test(token) ? JSON.stringify(token) : token).join(' ');
   const command = displayCommand || transportCommand;
   const [before, currencyBefore, treeBefore] = await Promise.all([
-    gitSnapshot(project.root), repositoryCurrency(project.root), captureDelta ? worktreeTree(project.root) : null,
+    gitSnapshot(project.root), repositoryCurrency(project.root, project.identity.id), captureDelta ? worktreeTree(project.root) : null,
   ]);
   const id = createRunId();
   const runDirectory = join(project.store, 'runs', project.key, id);
@@ -614,9 +621,9 @@ export async function runCommand(project, tokens, {
   await Promise.all([new Promise((r) => stdoutFile.end(r)), new Promise((r) => stderrFile.end(r))]);
   const ended = new Date();
   const [after, currencyAfter, treeAfter] = await Promise.all([
-    gitSnapshot(project.root), repositoryCurrency(project.root), captureDelta ? worktreeTree(project.root) : null,
+    gitSnapshot(project.root), repositoryCurrency(project.root, project.identity.id), captureDelta ? worktreeTree(project.root) : null,
   ]);
-  const reduction = reduceOutput(command, stdout, stderr, exitCode, { root: project.root });
+  const reduction = reduceOutput(command, stdout, stderr, exitCode, { root: project.root, kind: reductionKind, successMarkers });
   const missingCommand = exitCode !== 0 && /(?:command not found|is not recognized as (?:a name of |the name of )?a? ?(?:cmdlet|function|script file|executable program)|ENOENT)/i.test(normalizeTerminalText(`${stdout}\n${stderr}`));
   const accepted = acceptedExitCodes.includes(exitCode);
   const record = {
@@ -705,7 +712,7 @@ export async function recoverInterruptedRuns(project) {
     const stderr = existsSync(inflight.stderrPath) ? readFileSync(inflight.stderrPath, 'utf8') : '';
     const ended = new Date();
     const [after, currencyAfter, treeAfter] = await Promise.all([
-      gitSnapshot(project.root), repositoryCurrency(project.root), inflight.captureDelta ? worktreeTree(project.root) : null,
+      gitSnapshot(project.root), repositoryCurrency(project.root, project.identity.id), inflight.captureDelta ? worktreeTree(project.root) : null,
     ]);
     const reduction = reduceOutput(inflight.command, stdout, stderr, 1, { root: project.root });
     const record = {
@@ -820,6 +827,8 @@ export async function runRepositoryCommand(project, name, { stream = false, sign
     stream,
     shell: false,
     captureDelta: true,
+    reductionKind: selected.kind,
+    successMarkers: selected.successMarkers,
     signal, onStart, onOutput,
     operationIdentity: { type: 'repository-command', name: selected.name, displayCommand: selected.command },
     operationReducer: ({ exitCode, command, record }) => ({
@@ -1232,7 +1241,7 @@ export function runById(project, id) {
 
 export async function operationHistory(project, limit = 25) {
   const bounded = Math.max(1, Math.min(100, Number(limit) || 25));
-  const currency = await repositoryCurrency(project.root);
+  const currency = await repositoryCurrency(project.root, project.identity.id);
   return listRuns(project, 100).filter((record) => record.operation).slice(0, bounded).map((record) => ({
     runId: record.id,
     type: record.operation.type,
@@ -1257,7 +1266,7 @@ export async function operationHistory(project, limit = 25) {
 export async function operationDetail(project, id) {
   const record = runById(project, id);
   if (!record?.operation) return null;
-  const currency = await repositoryCurrency(project.root);
+  const currency = await repositoryCurrency(project.root, project.identity.id);
   const context = buildOperationContext(project, record);
   return {
     runId: record.id,
