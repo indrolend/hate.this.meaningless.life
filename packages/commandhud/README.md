@@ -1,6 +1,6 @@
-# DATA CommandHUD core
+# CommandHUD core
 
-`hud` is the persistent local development front door for DATA. It verifies the project root, records Git authority around every command, preserves raw output, and emits a deterministic continuation packet.
+`hud` is a persistent local development front door for Git repositories. It verifies the selected root, records Git authority around every command, preserves raw output, and emits a deterministic continuation packet.
 
 ## Primary product surface
 
@@ -10,22 +10,22 @@ The CLI remains first-class automation over the same core. The local server and 
 
 ## Install the local entrypoint
 
-From the repository root:
+From this package directory:
 
 ```text
 npm link
 ```
 
-This exposes the repository's `hud` bin through npm's user-level binary directory. It does not install a service or start a UI. Remove it with `npm unlink --global digital-breakdown-apk`.
+This exposes `hud` and `commandhud` through npm's user-level binary directory. It does not install a service or start a UI. Remove it with `npm unlink --global @indrolend/commandhud`.
 
-Without linking, use `npm run hud -- <command>`.
+Without linking, use `node cli.mjs <command>`.
 
 ## Windows desktop launcher
 
-Double-click `CommandHUD.cmd` at the repository root, or run:
+Run the product-root `CommandHUD.cmd` from the repository you want to attach, or run:
 
 ```powershell
-node tools/hud/cli.mjs desktop
+node cli.mjs desktop --root C:\path\to\repository
 ```
 
 The launcher verifies the repository, acquires one desktop-instance lock for it, starts the same loopback-only authoritative HUD server on an available port, and opens the renderer in a dedicated Microsoft Edge or Google Chrome app-mode window. Closing that window stops the owned server and releases the lock. A stale lock from a dead launcher is replaced; a live owner blocks a second desktop instance.
@@ -36,9 +36,9 @@ This is the first thin Windows host, not the final packaged `CommandHUD.exe`. It
 
 ### Historical prototype relationship
 
-The earlier Windows Forms prototype remains in the separate `hate.this.meaningless.life` repository at `legacy/commandhud/CommandHud-v21-corebridge.ps1`. It established useful interaction behavior: persistent cwd, focused command input, Enter-to-run, streaming output, Stop, copy, and local command recall. Those are product references, not a second authority.
+The earlier Windows Forms prototype remains at `../../legacy/commandhud/CommandHud-v21-corebridge.ps1`. It established useful interaction behavior: persistent cwd, focused command input, Enter-to-run, streaming output, Stop, copy, and local command recall. Those are product references, not a second authority.
 
-The DATA core supersedes the prototype's session JSONL/log ownership and PowerShell-runspace execution with verified repository identity, immutable runs, typed browser operations, evidence currency, cancellation, recovery, and Undo. The desktop launcher does not invoke or copy the legacy execution layer. Features should migrate by expressing their intent through the DATA runtime rather than maintaining two histories or state models.
+The current core supersedes the prototype's session JSONL/log ownership and PowerShell-runspace execution with verified repository identity, immutable runs, typed browser operations, evidence currency, cancellation, recovery, and Undo. The desktop launcher does not invoke or copy the legacy execution layer.
 
 ## Workflow
 
@@ -269,11 +269,11 @@ In the live renderer, submitting Search sends structured `query` and `scope` JSO
 
 `hud visual-state` remains a compatibility path for static hosting. It writes ignored `hud-state.js`, which contains machine-specific paths and transient Git state. Static mode can navigate that snapshot but cannot stream repository media. The browser command bar stages and copies exact commands; actual command execution remains owned by the CLI and Windows bridge.
 
-## Windows CommandHUD bridge
+## Historical Windows CommandHUD bridge
 
-The active bridge lives in the separate `hate.this.meaningless.life` repository at `legacy/commandhud/CommandHud-v21-corebridge.ps1`.
+The retained bridge lives at `../../legacy/commandhud/CommandHud-v21-corebridge.ps1` and is no longer the primary entrypoint.
 
-The bridge owns UI/runspace concerns: input, animation, cancellation, current PowerShell directory, and local UI history. DATA owns run evidence, reduction, Git/workflow semantics, and presentation. The bridge resolves `tools/hud/cli.mjs` from the active repository and falls back to ordinary PowerShell when no compatible core exists.
+It remains behavioral evidence for the old Windows Forms interaction model. New execution, evidence, reduction, and presentation work belongs in this package.
 
 Important cwd contract: commands execute in a child PowerShell process, which records its final working directory for the parent runspace. Preserve that handoff when changing command transport.
 
@@ -283,8 +283,8 @@ Before changing the HUD:
 
 ```text
 git status --short --branch
-npm run hud:test
-node tools/hud/cli.mjs state
+npm test
+node cli.mjs state
 ```
 
 Preserve these contracts:
@@ -293,7 +293,7 @@ Preserve these contracts:
 - semantic views are derived from authoritative state;
 - a nonzero underlying command remains nonzero;
 - workflow retries resolve from the latest immutable stage attempt;
-- wrong repositories are rejected rather than silently substituted;
+- non-repository roots are rejected rather than silently substituted;
 - the visual prototype remains a renderer, not a second backend.
 
 Current local continuation sequence is represented by these commits:
@@ -308,8 +308,8 @@ Set `HUD_STATE_ROOT` to isolate state in tests or automation.
 
 ## Authority and safety
 
-- A Git repository without `distribution/project.json` identifying `indrolend/data` is rejected.
-- When invoked outside any repository, HUD may use the last verified DATA registration.
-- When invoked inside a different repository, HUD fails instead of silently switching roots.
+- A real Git root is required; optional project manifests provide explicit identity.
+- When invoked outside a repository, HUD fails unless `--root` selects one.
+- The selected repository remains authoritative and is never silently substituted.
 - HUD never commits, pushes, publishes, deploys, resets, or cleans by default.
 - Repository scripts remain the verification adapters; GitHub Actions remains release authority.

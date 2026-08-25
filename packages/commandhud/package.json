@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "bin": {
+    "hud": "./cli.mjs",
     "commandhud": "./cli.mjs"
   },
   "scripts": {

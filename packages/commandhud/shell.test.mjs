@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { spawnSync } from 'node:child_process';
-import { existsSync } from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { deliverShellResult, renderShellResult } from './shell.mjs';
@@ -69,14 +69,16 @@ test('clipboard failure is visible without discarding shortened output', () => {
 test('Windows repository launcher works from outside its checkout', {
   skip: process.platform !== 'win32' || !existsSync(resolve(import.meta.dirname, '..', '..', 'CommandHUD Shell.cmd')),
 }, () => {
-  const root = resolve(import.meta.dirname, '..', '..');
-  const launcher = join(root, 'CommandHUD Shell.cmd');
+  const productRoot = resolve(import.meta.dirname, '..', '..');
+  const launcher = join(productRoot, 'CommandHUD Shell.cmd');
+  const root = mkdtempSync(join(tmpdir(), 'commandhud-launcher-'));
+  execFileSync('git', ['init', '-b', 'main'], { cwd: root });
   const result = spawnSync('cmd.exe', ['/d', '/c', launcher], {
-    cwd: tmpdir(), input: '/cwd\r\n/exit\r\n', encoding: 'utf8', timeout: 15000,
+    cwd: root, input: '/cwd\r\n/exit\r\n', encoding: 'utf8', timeout: 15000,
     windowsHide: true,
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /hate\.this\.meaningless\.life · context condenser/);
-  assert.match(result.stdout, /Repository: digital-breakdown-apk · Shell: PowerShell/);
+  assert.match(result.stdout, /Repository: commandhud-launcher-/);
   assert.match(result.stdout, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
 });

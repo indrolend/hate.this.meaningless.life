@@ -299,13 +299,28 @@ test('failed commands remain failed while preserving raw stderr', async () => {
   assert.match(readFileSync(record.stderrPath, 'utf8'), /expected failure/);
 });
 
-test('wrong repositories are rejected and dirty state is captured', async () => {
+test('any Git repository is verified while non-repositories are rejected', async () => {
   const root = fixture();
   writeFileSync(join(root, 'file.txt'), 'dirty\n');
   assert.equal((await gitSnapshot(root)).dirty, true);
-  const wrong = mkdtempSync(join(tmpdir(), 'hud-wrong-'));
-  execFileSync('git', ['init', '-b', 'main'], { cwd: wrong });
-  await assert.rejects(resolveProject({ cwd: wrong, env: { ...process.env, HUD_STATE_ROOT: join(root, '.state') } }), /not the verified/);
+  const generic = mkdtempSync(join(tmpdir(), 'hud-generic-'));
+  execFileSync('git', ['init', '-b', 'main'], { cwd: generic });
+  const project = await resolveProject({ cwd: generic, env: { ...process.env, HUD_STATE_ROOT: join(root, '.state') } });
+  assert.match(project.identity.id, /^local\/hud-generic-/);
+  assert.equal(project.identity.source, 'git-root');
+  const outside = mkdtempSync(join(tmpdir(), 'hud-outside-'));
+  await assert.rejects(resolveProject({ cwd: outside, env: { ...process.env, HUD_STATE_ROOT: join(root, '.state') } }), /No Git repository/);
+});
+
+test('explicit project identity overrides remote-derived identity', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'hud-identity-'));
+  execFileSync('git', ['init', '-b', 'main'], { cwd: root });
+  execFileSync('git', ['remote', 'add', 'origin', 'https://github.com/example/inferred.git'], { cwd: root });
+  writeFileSync(join(root, 'commandhud.project.json'), JSON.stringify({ id: 'owner/declared', name: 'Declared project' }));
+  const project = await resolveProject({ cwd: root, env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'hud-identity-state-')) } });
+  assert.equal(project.identity.id, 'owner/declared');
+  assert.equal(project.identity.name, 'Declared project');
+  assert.equal(project.identity.source, 'commandhud.project.json');
 });
 
 test('update comparison uses canonical manifest commit and platform artifact', async () => {

@@ -96,29 +96,44 @@ function projectKey(identity) {
   return identity.id.replace(/[^a-z0-9_-]+/gi, '_').toLowerCase();
 }
 
+function inferredProjectId(root, remote) {
+  const normalized = String(remote || '').trim().replace(/\\/g, '/').replace(/\.git$/i, '');
+  const match = normalized.match(/(?:github\.com[/:]|\/)([^/:]+\/[^/]+)$/i);
+  return match?.[1] || `local/${basename(root)}`;
+}
+
 export async function verifyRoot(candidate) {
   const requested = resolve(candidate);
   const rootResult = await exec('git', ['rev-parse', '--show-toplevel'], requested);
   if (!rootResult.ok) throw new Error(`No Git repository found from ${requested}`);
   const root = resolve(rootResult.stdout);
-  const identityPath = join(root, 'distribution', 'project.json');
-  const identity = readJson(identityPath);
-  if (!identity?.id || identity.id !== 'indrolend/data') {
-    throw new Error(`Repository at ${root} is not the verified indrolend/data project.`);
+  const identityPaths = [
+    join(root, 'commandhud.project.json'),
+    join(root, '.commandhud', 'project.json'),
+    join(root, 'distribution', 'project.json'),
+  ];
+  const identityPath = identityPaths.find((path) => existsSync(path));
+  const declared = identityPath ? readJson(identityPath) : null;
+  if (identityPath && (!declared?.id || typeof declared.id !== 'string')) {
+    throw new Error(`CommandHUD project identity is invalid: ${identityPath}`);
   }
-  return { root, identity };
+  const remote = await exec('git', ['config', '--get', 'remote.origin.url'], root);
+  const id = declared?.id?.trim() || inferredProjectId(root, remote.ok ? remote.stdout : null);
+  if (!id || /[\0\r\n]/.test(id)) throw new Error(`Repository at ${root} has an unusable project identity.`);
+  return {
+    root,
+    identity: {
+      ...(declared || {}), id,
+      name: declared?.name || basename(root),
+      source: identityPath ? relative(root, identityPath).replaceAll('\\', '/') : remote.ok ? 'git-remote' : 'git-root',
+    },
+  };
 }
 
 export async function resolveProject({ cwd = process.cwd(), root, env = process.env } = {}) {
   const store = stateRoot(env);
   if (root) return registerProject(await verifyRoot(root), store);
-  try { return registerProject(await verifyRoot(cwd), store); } catch (cwdError) {
-    const insideOtherRepo = await exec('git', ['rev-parse', '--show-toplevel'], cwd);
-    if (insideOtherRepo.ok) throw cwdError;
-    const registration = readJson(join(store, 'projects', 'indrolend_data.json'));
-    if (!registration?.root) throw cwdError;
-    return registerProject(await verifyRoot(registration.root), store);
-  }
+  return registerProject(await verifyRoot(cwd), store);
 }
 
 function registerProject(project, store) {
