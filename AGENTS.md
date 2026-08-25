@@ -20,7 +20,7 @@
 - Treat `packages/commandhud/` as the current product runtime and test authority.
 - Treat `legacy/commandhud/CommandHud-v21.ps1` as behavioral evidence for the original Windows command surface, not an active launcher.
 - Treat `packages/vscode-extension/` as a retained project/order prototype, not current execution authority.
-- Treat `portable/Install-DataFactory-Portable.ps1` as historical bootstrap evidence, not a distribution path.
+- The historical portable VS Code bootstrap was removed as superseded distribution code; use Git history if its implementation evidence is needed.
 - Keep repository-specific scripts and typed command declarations in their repository; do not copy the generic HUD runtime into projects it operates on.
 
 ## Required change workflow

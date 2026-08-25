@@ -42,6 +42,5 @@ Each record carries project identity, root, branch, commit, command, exit status
 | root `hud.cmd` and `CommandHUD*.cmd` | current Windows front doors |
 | `legacy/commandhud/` | original Windows GUI behavioral reference |
 | `packages/vscode-extension/` | separate project/order prototype |
-| `portable/` | historical portable-host experiment |
 
 Legacy material may be removed only after a tested current equivalent exists or its unique behavior is explicitly rejected.

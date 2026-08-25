@@ -10,7 +10,6 @@ This inventory classifies what is authoritative now. File age and directory name
 | `.github/workflows/commandhud-checks.yml` | current verification authority | exercises the package on supported hosted platforms |
 | `legacy/commandhud/CommandHud-v21*.ps1` | historical behavioral reference | preserves the original Windows Forms interaction and persistent-runspace lineage; not a current launcher |
 | `packages/vscode-extension/` | retained independent prototype | records the earlier DataFactory project/order/agent-packet model; not part of current CommandHUD execution |
-| `portable/` | retained historical prototype | records an earlier portable VS Code bootstrap; not a current distribution path |
 | `examples/` | example integration data | demonstrates project declaration shape; not runtime authority |
 
 ## Current contract
@@ -33,7 +32,7 @@ The Windows Forms prototype still documents interaction details such as a dedica
 
 The DataFactory extension contains a deterministic order abstraction and provider-neutral agent packet. Current CommandHUD has objectives, frontier state, run packets, and handoff evidence, but the old order schema should be deleted only after its unique constraints are either deliberately adopted or rejected.
 
-The portable bootstrap is superseded as a launcher by the installable Node product and root front doors. Keep it only as migration evidence until a deliberate archival commit removes it.
+The portable VS Code bootstrap and bundled VSIX had no unique current CommandHUD behavior. They were removed after verification showed that they only downloaded VS Code, installed the retained DataFactory extension, created a shortcut, and launched it. Git history preserves that implementation evidence.
 
 ## Resolved former gaps
 
@@ -48,4 +47,4 @@ The portable bootstrap is superseded as a launcher by the installable Node produ
 - No packaged signed native executable or installer exists.
 - The visual desktop host is Windows-only; other platforms use the CLI, terminal UI, or local server.
 - Session presence/navigation is process-local rather than synchronized through an account or relay.
-- Historical prototype directories still need a deliberate keep/archive/delete decision after their unique behavior is accounted for.
+- The retained Windows Forms and DataFactory prototypes still need a deliberate keep/archive/delete decision after their unique behavior is accounted for.

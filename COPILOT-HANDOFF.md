@@ -2,7 +2,7 @@
 
 ## Authority
 
-The current product runtime is `packages/commandhud/`. Do not begin new implementation in `legacy/commandhud/`, `packages/vscode-extension/`, `portable/`, or a selected project's copied `tools/hud` directory.
+The current product runtime is `packages/commandhud/`. Do not begin new implementation in `legacy/commandhud/`, `packages/vscode-extension/`, or a selected project's copied `tools/hud` directory.
 
 The current product authority is the repository's `main` branch. Inspect Git status, branch, HEAD, and tests before changing it; source and runtime evidence override this handoff.
 
@@ -60,4 +60,4 @@ See `docs/MATERIAL-INVENTORY.md`. Historical prototypes remain for explicit beha
 
 ## Highest-leverage next decision
 
-Decide whether the old VS Code and portable prototypes contain any still-desired unique contract; archive or remove them rather than leaving ambiguous parallel products. Keep current implementation work in `packages/commandhud/` and project-specific integrations in the projects that own them.
+Decide whether the old VS Code order model contains a still-desired unique contract and whether the Windows Forms reference still adds present-day utility. Keep current implementation work in `packages/commandhud/` and project-specific integrations in the projects that own them.
