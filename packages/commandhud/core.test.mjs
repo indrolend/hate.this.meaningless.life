@@ -503,6 +503,14 @@ test('current semantic state derives renderer-neutral project, cwd, git, workflo
   assert.equal(value.status, 'in_progress');
 });
 
+test('current semantic state never presents a cwd outside the selected repository', async () => {
+  const project = await fixtureProject();
+  const outside = mkdtempSync(join(tmpdir(), 'hud-state-outside-'));
+  const value = await currentState(project, { cwd: outside });
+  assert.equal(value.cwd.absolute, project.root);
+  assert.equal(value.cwd.display, '.');
+});
+
 test('packet schema contains only deterministic continuation fields', () => {
   const packet = buildPacket({
     status: 'pass', objective: 'test', command: 'npm test', exitCode: 0,

@@ -1160,14 +1160,16 @@ export async function currentState(project, { cwd = process.cwd() } = {}) {
   const last = runs[0] || null;
   const workflowRun = runs.find((run) => run.workflow?.id) || null;
   const workflow = workflowRun ? workflowView(project, workflowRun.workflow.id, 100) : null;
-  const absoluteCwd = resolve(cwd);
-  const relativeCwd = relative(project.root, absoluteCwd);
-  const cwdInProject = relativeCwd === '' || (!isAbsolute(relativeCwd) && relativeCwd !== '..' && !relativeCwd.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`));
+  const requestedCwd = resolve(cwd);
+  const requestedRelative = relative(project.root, requestedCwd);
+  const cwdInProject = requestedRelative === '' || (!isAbsolute(requestedRelative) && requestedRelative !== '..' && !requestedRelative.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`));
+  const absoluteCwd = cwdInProject ? requestedCwd : project.root;
+  const relativeCwd = cwdInProject ? requestedRelative : '';
 
   return {
     schemaVersion: SCHEMA_VERSION,
     project: { id: project.identity.id, name: basename(project.root), root: project.root },
-    cwd: { absolute: absoluteCwd, display: cwdInProject ? (relativeCwd || '.') : absoluteCwd },
+    cwd: { absolute: absoluteCwd, display: relativeCwd || '.' },
     git,
     repository,
     commands: discoverCommands(project.root),
