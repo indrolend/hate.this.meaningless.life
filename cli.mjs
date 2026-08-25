@@ -6,7 +6,7 @@ import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, reposito
 
 function parse(argv) {
   const args = [...argv];
-  const options = { copy: false, quiet: false, root: null, objective: null, request: null, requestB64: null, workflowId: null, workflowName: null, stage: null, stageIndex: null, stageCount: null, json: false, host: '127.0.0.1', port: 8765 };
+  const options = { copy: false, quiet: false, root: null, shell: null, objective: null, request: null, requestB64: null, workflowId: null, workflowName: null, stage: null, stageIndex: null, stageCount: null, json: false, host: '127.0.0.1', port: 8765 };
   const command = args.shift() || 'context';
   const positionals = [];
   for (let index = 0; index < args.length; index++) {
@@ -18,7 +18,7 @@ function parse(argv) {
     else if (value === '--lan') options.host = '0.0.0.0';
     else if (value === '--host') options.host = args[++index];
     else if (value === '--port') options.port = Number(args[++index]);
-    else if (value === '--root' || value === '--objective' || value === '--request') options[value.slice(2)] = args[++index];
+    else if (value === '--root' || value === '--shell' || value === '--objective' || value === '--request') options[value.slice(2)] = args[++index];
     else if (value === '--request-b64') options.requestB64 = args[++index];
     else if (value === '--workflow-id') options.workflowId = args[++index];
     else if (value === '--workflow-name') options.workflowName = args[++index];
@@ -146,6 +146,11 @@ async function main() {
       process.removeListener('SIGINT', stop);
       process.removeListener('SIGTERM', stop);
     }
+    return;
+  }
+  if (command === 'shell') {
+    const { startHudShell } = await import('./shell.mjs');
+    await startHudShell(project, { shell: options.shell || undefined });
     return;
   }
   if (command === 'serve') {

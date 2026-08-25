@@ -51,6 +51,19 @@ hud tools
 hud update
 ```
 
+## Terminal-only HUD
+
+Run `hud shell` for a persistent terminal interface over the same immutable evidence and reduction system as the desktop command bar. Paste ordinary commands directly; CommandHUD executes them in the selected shell, displays the shortened result, and automatically copies that identical ChatGPT-ready context to the clipboard while retaining complete stdout and stderr.
+
+On Windows, `CommandHUD Shell.cmd` at the repository root provides the same terminal-only interface as a double-clickable launcher. It finds the HUD relative to the clone instead of relying on a fixed checkout path, reports a clear prerequisite error when Node.js is unavailable, and remains valid across branches. Desktop `.lnk` files are intentionally machine-specific; point one at the repository-owned `.cmd` in each clone.
+
+```text
+hud shell
+hud shell --shell bash
+```
+
+The terminal keeps repository-contained cwd changes between commands. `/copy`, `/context`, `/raw`, `/history`, `/undo`, `/shell`, `/cwd`, and `/exit` expose the recorded context and controls without requiring repeated `hud run` wrappers. Undo remains preview-first. Automatic clipboard failure is reported without changing the real command result, and `/copy` retries the last context explicitly.
+
 `hud run` streams the command while writing separate raw stdout and stderr logs. Use `--quiet` when only the final reduced packet is wanted. A nonzero underlying command remains nonzero: `PASS` exits 0, `FAIL` exits 1, `BLOCKED` exits 2, and HUD transport/tooling `ERROR` exits 3.
 
 ## State

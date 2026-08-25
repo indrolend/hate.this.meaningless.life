@@ -988,7 +988,7 @@ export function buildOperationContext(project, record) {
     lines.push(`COMMAND ${operation.command || record.command}`);
     lines.push(`RESULT ${record.status.toUpperCase()} exit=${record.exitCode} duration=${record.durationMs}ms`);
   }
-  lines.push('', `RAW run:${record.id}`, `STDOUT ${record.stdoutPath}`, `STDERR ${record.stderrPath}`);
+  lines.push('', `RAW run:${record.id} · inspect with /raw`);
   const handoff = lines.join('\n');
   const rawBytes = evidenceSize(record.stdoutPath) + evidenceSize(record.stderrPath);
   const contextBytes = Buffer.byteLength(handoff);
