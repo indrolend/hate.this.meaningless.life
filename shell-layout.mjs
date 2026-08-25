@@ -19,6 +19,15 @@ export function footerActionAt(column, footer = footerText()) {
   return null;
 }
 
+export function splitMouseInput(value) {
+  const events = [];
+  const text = String(value).replace(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g, (_, button, column, row, phase) => {
+    events.push({ button: Number(button), column: Number(column), row: Number(row), phase });
+    return '';
+  });
+  return { text, events };
+}
+
 function terminalSize(output) {
   return {
     columns: Math.max(40, Number(output.columns) || 80),
@@ -57,6 +66,8 @@ export function createShellLayout(output, { enabled = true } = {}) {
     writeAt(1, clip('(._.)  hate.this.meaningless.life  ·  context condenser', columns));
     writeAt(2, 'IDLE');
     writeAt(3, rule);
+    writeAt(4, '> ');
+    writeAt(5, rule);
     writeAt(rows - 3, rule);
     renderFooter(false);
     writeAt(rows - 1, '');
@@ -80,22 +91,20 @@ export function createShellLayout(output, { enabled = true } = {}) {
     lastPanel = String(text);
     if (!active) return;
     const { columns, rows } = terminalSize(output);
-    const top = 4;
-    const height = Math.max(1, rows - 7);
+    const top = 6;
+    const height = Math.max(1, rows - 9);
     const lines = fitPanelLines(lastPanel, columns, height);
     for (let index = 0; index < height; index++) writeAt(top + index, lines[index] || '');
   }
 
   function placePrompt(prompt) {
     if (!active) return;
-    const { rows } = terminalSize(output);
-    output.write(`${CSI}${rows};1H${CSI}2K${prompt}`);
+    output.write(`${CSI}4;1H${CSI}2K${prompt}`);
   }
 
   function clearPrompt() {
     if (!active) return;
-    const { rows } = terminalSize(output);
-    output.write(`${CSI}${rows};1H${CSI}2K`);
+    output.write(`${CSI}4;1H${CSI}2K> `);
   }
 
   function start() {

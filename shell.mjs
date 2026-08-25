@@ -2,12 +2,13 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { basename, relative } from 'node:path';
 import { createInterface } from 'node:readline/promises';
+import { PassThrough } from 'node:stream';
 import {
   buildOperationContext, discoverShells, lastRun, listRuns,
   runTerminalCommand, undoOperation, undoPlan,
 } from './core.mjs';
 import { createShellVisualStatus, IDLE_FACE, visualMotionEnabled } from './shell-visual.mjs';
-import { createShellLayout } from './shell-layout.mjs';
+import { createShellLayout, splitMouseInput } from './shell-layout.mjs';
 
 function clipboard(text) {
   const tool = process.platform === 'win32' ? ['clip.exe', []]
@@ -68,7 +69,7 @@ export async function startHudShell(project, {
   input = process.stdin, output = process.stdout,
   clipboardWriter = clipboard,
   visual = true,
-  tui = true,
+  tui = false,
 } = {}) {
   const available = await discoverShells(project.root);
   let shell = available.find((entry) => entry.id === requestedShell && entry.available);
@@ -76,53 +77,41 @@ export async function startHudShell(project, {
   let cwd = project.root;
   let activeController = null;
   const interactive = Boolean(input.isTTY && output.isTTY);
-  const motion = visualMotionEnabled({ interactive, requested: visual });
+  const motion = visualMotionEnabled({ interactive, requested: visual && tui });
   const layout = createShellLayout(output, { enabled: interactive && tui });
-  const terminal = createInterface({ input, output, terminal: interactive });
+  const filteredInput = interactive && tui ? new PassThrough() : input;
+  if (filteredInput !== input) {
+    filteredInput.isTTY = true;
+    filteredInput.setRawMode = (mode) => input.setRawMode?.(mode);
+  }
+  const terminal = createInterface({ input: filteredInput, output, terminal: interactive });
   const pipedCommands = interactive ? null : terminal[Symbol.asyncIterator]();
   if (layout.active === false && interactive && tui) layout.start();
   if (!layout.active) {
-    output.write(`${IDLE_FACE} CommandHUD · ${shell.label} · ${basename(project.root)}\n`);
-    output.write('Paste a command. Shortened output is shown and copied automatically; full evidence is retained. /help for controls.\n\n');
+    output.write(`${IDLE_FACE} hate.this.meaningless.life · context condenser\n`);
+    output.write(`Repository: ${basename(project.root)} · Shell: ${shell.label} · /help for controls\n\n`);
   }
 
   const show = (value) => layout.active ? layout.renderOutput(String(value).trimEnd()) : output.write(value);
   let currentPrompt = '';
 
-  const mouseHandler = (chunk) => {
+  const inputHandler = (chunk) => {
     if (!layout.active) return;
-    const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
-    for (const match of text.matchAll(/\x1b\[<(\d+);(\d+);(\d+)([Mm])/g)) {
-      const button = Number(match[1]);
-      const action = layout.actionAt(Number(match[2]), Number(match[3]));
+    const parsed = splitMouseInput(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
+    for (const event of parsed.events) {
+      const action = layout.actionAt(event.column, event.row);
       layout.setHover(action);
-      if (button !== 0 || match[4] !== 'M' || !action) {
-        setImmediate(() => {
-          const cleaned = String(terminal.line || '').replace(/<?\d+;\d+;\d+[Mm]/g, '');
-          if (cleaned === terminal.line) return;
-          terminal.line = cleaned;
-          terminal.cursor = cleaned.length;
-          if (layout.active) layout.placePrompt(`${currentPrompt}${cleaned}`);
-        });
-        continue;
-      }
+      if (event.button !== 0 || event.phase !== 'M' || !action) continue;
       if (terminal.line) {
         show('Finish or clear the current command before using a mouse action.');
         continue;
       }
       terminal.write(action);
       terminal.write(null, { name: 'return' });
-      setImmediate(() => {
-        if (!layout.active) return;
-        const cleaned = String(terminal.line || '').replace(/<?\d+;\d+;\d+[Mm]/g, '');
-        if (cleaned === terminal.line) return;
-        terminal.line = cleaned;
-        terminal.cursor = cleaned.length;
-        layout.placePrompt(`${currentPrompt}${cleaned}`);
-      });
     }
+    if (parsed.text) filteredInput.write(parsed.text);
   };
-  if (layout.active) input.prependListener('data', mouseHandler);
+  if (layout.active) input.on('data', inputHandler);
 
   terminal.on('SIGINT', () => {
     if (activeController) activeController.abort();
@@ -133,10 +122,10 @@ export async function startHudShell(project, {
       let command;
       try {
         if (interactive) {
-          const prompt = `${shell.id} ${displayCwd(project, cwd)}> `;
+          const prompt = layout.active ? '> ' : '> ';
           currentPrompt = prompt;
           if (layout.active) layout.placePrompt(prompt);
-          command = await terminal.question(layout.active ? '' : `${IDLE_FACE} ${prompt}`);
+          command = await terminal.question(layout.active ? '' : prompt);
           layout.clearPrompt();
         }
         else {
@@ -223,7 +212,8 @@ export async function startHudShell(project, {
       }
     }
   } finally {
-    input.removeListener('data', mouseHandler);
+    input.removeListener('data', inputHandler);
+    if (filteredInput !== input) filteredInput.end();
     terminal.close();
     layout.finish();
   }

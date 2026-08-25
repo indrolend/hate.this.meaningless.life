@@ -73,6 +73,7 @@ test('Windows repository launcher works from outside its checkout', { skip: proc
     windowsHide: true,
   });
   assert.equal(result.status, 0, result.stderr || result.stdout);
-  assert.match(result.stdout, /CommandHUD · PowerShell · digital-breakdown-apk/);
+  assert.match(result.stdout, /hate\.this\.meaningless\.life · context condenser/);
+  assert.match(result.stdout, /Repository: digital-breakdown-apk · Shell: PowerShell/);
   assert.match(result.stdout, new RegExp(root.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'i'));
 });

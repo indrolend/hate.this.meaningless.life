@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { createShellLayout, fitPanelLines, footerActionAt } from './shell-layout.mjs';
+import { createShellLayout, fitPanelLines, footerActionAt, splitMouseInput } from './shell-layout.mjs';
 
 test('fixed terminal panel preserves useful head and raw reference when bounded', () => {
   const input = Array.from({ length: 20 }, (_, index) => `line ${index + 1}`).join('\n');
@@ -21,8 +21,8 @@ test('fixed terminal layout uses alternate screen and stable top and bottom regi
   layout.finish();
   assert.match(value, /\x1b\[\?1049h/);
   assert.match(value, /\x1b\[1;1H.*hate\.this\.meaningless\.life/);
-  assert.match(value, /\x1b\[4;1H.*PASS/);
-  assert.match(value, /\x1b\[20;1H.*powershell/);
+  assert.match(value, /\x1b\[6;1H.*PASS/);
+  assert.match(value, /\x1b\[4;1H.*powershell/);
   assert.match(value, /\x1b\[\?1049l/);
 });
 
@@ -47,4 +47,14 @@ test('terminal footer exposes bounded mouse actions without executable text', ()
   assert.equal(footerActionAt(52), '/help');
   assert.equal(footerActionAt(61), '/exit');
   assert.equal(footerActionAt(1), null);
+});
+
+test('mouse protocol is removed before command input while real typing survives', () => {
+  const parsed = splitMouseInput(`git status\x1b[<35;19;22M\x1b[<0;19;22M\x1b[<0;19;22m`);
+  assert.equal(parsed.text, 'git status');
+  assert.deepEqual(parsed.events, [
+    { button: 35, column: 19, row: 22, phase: 'M' },
+    { button: 0, column: 19, row: 22, phase: 'M' },
+    { button: 0, column: 19, row: 22, phase: 'm' },
+  ]);
 });
