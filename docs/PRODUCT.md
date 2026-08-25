@@ -2,42 +2,61 @@
 
 ## User outcome
 
-Open one project, see its real state, state an intention, run or delegate bounded work, inspect evidence, and recover the history without navigating an IDE maze.
+Paste an ordinary command into a repository-aware terminal, let the real machine execute it, retain the complete evidence, and receive a compact truthful result that is easy to paste back into an LLM.
 
-## Views
+CommandHUD is local-first developer tooling. It does not replace Git, shells, repository scripts, or the filesystem; it makes their state and consequences easier to operate and transfer.
 
-| View | Owns |
+## Primary loop
+
+```text
+LLM command
+  -> paste into CommandHUD
+  -> execute in an explicit shell and verified repository cwd
+  -> preserve raw stdout, stderr, exit status, duration, and Git state
+  -> derive bounded deterministic context
+  -> copy compact handoff
+  -> paste back into the LLM
+```
+
+## Current interfaces
+
+| Interface | Purpose |
 | --- | --- |
-| PROJECT | verified root, origin, branch, commit, dirty state, dependencies |
-| WORK | current and previous orders |
-| INSPECT | latest output, evidence, diff, failure, runtime state |
-| CHAT | free exploration and deterministic goal creation |
+| `hud shell` | primary fixed terminal UI and context-condenser loop |
+| `hud desktop` | Windows local application window with repository map and trusted terminal capability |
+| `hud serve` | local visual client without arbitrary shell-over-HTTP |
+| `hud <operation>` | first-class CLI for state, Search, commands, history, handoff, workflows, and Undo |
 
-## Verbs
+These clients consume one runtime state and immutable evidence model. Presentation state is not repository authority.
 
-`OPEN` `CLONE` `RUN` `TEST` `CHANGE` `UNDO` `SUMMON` `EXPORT`
+## Interaction contract
 
-This iteration only needs the verbs required for one end-to-end path. Do not add disabled decorative controls.
+- Input and output remain visually distinct and stable.
+- Ordinary shell commands remain ordinary commands and preserve exact user intent separately from transport details.
+- Long output is reduced deterministically; raw evidence is always reachable.
+- Compact output copies automatically in the terminal UI, and explicit copy remains available.
+- Running work reports factual running, passed, failed, cancelled, interrupted, stale, or blocked state.
+- Cancellation targets only the runtime-owned active operation.
+- History is derived from immutable per-project records.
+- Search highlights factual matches without inventing dependencies or ownership.
+- Undo is a recorded forward operation that reverses a still-applicable worktree delta; it never implies reversal of commits, pushes, or external effects.
+- Visual motion is quiet by default and represents observed operations rather than decorative fake activity.
 
-## Command HUD behavior to preserve
+## Capability boundary
 
-- OUTPUT and INPUT are visually distinct.
-- Enter runs; Shift+Enter inserts a line.
-- RUN executes asynchronously; STOP cancels.
-- LIVE opens active output.
-- COPY copies latest output only.
-- ALL copies command/output history for the active project.
-- Clicking OUTPUT copies it.
-- Clicking empty INPUT pastes new clipboard text; auto-run is an explicit setting.
-- Mouse wheel traverses command history.
-- Output prints once.
-- History persists per project and session.
-- The face reports ready, running, passed, failed, stopped, copied, dirty, stale, or missing dependency.
+A typed capability has a stable identity, inspectable command or primitive, validated inputs, repository boundary, known mutation/effect class, and recorded success or failure evidence. Repository-owned commands are rediscovered by identity at execution time; a browser does not submit arbitrary executable strings to the typed-operation endpoint.
 
-## Order
+The trusted desktop terminal is deliberately different: it accepts ordinary shell text because direct command execution is the product's primary local workflow. That permission is local to the desktop host and is not exposed by ordinary `hud serve`.
 
-An order records intent, authority, constraints, required evidence, status, and timestamps. Creating an order does not automatically summon an external agent.
+## Authority and portability
 
-## Capability
+- A verified Git root is required for execution.
+- Project identity and optional typed commands come from the selected repository.
+- Machine-local evidence stays outside Git.
+- The generic runtime lives in this product repository, not in every selected project.
+- CLI and terminal paths are Node-based and cross-platform where the selected shell exists.
+- The current native-feeling desktop host is Windows-only; a packaged signed application remains future work.
 
-A capability is a reusable operation with declared inputs, outputs, working directory, mutations, external effects, and success/failure evidence. It is more than a shell alias.
+## Product restraint
+
+Do not add fake metrics, inferred dependency graphs, decorative process claims, arbitrary shell-over-HTTP, duplicate command catalogs, or a second state/history model. Add a feature when it measurably reduces friction in a real development loop while preserving inspectable computation and evidence.

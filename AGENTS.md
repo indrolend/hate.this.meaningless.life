@@ -15,11 +15,13 @@
 - Humor reflects observed runtime state; it does not hide or invent state.
 - Do not fork VS Code unless a demonstrated extension API limitation blocks a required behavior.
 
-## Existing implementations
+## Implementation authority
 
-- Treat `legacy/commandhud/CommandHud-v21.ps1` as behavioral evidence for the command surface.
-- Treat `packages/vscode-extension/` as the current project/order implementation.
-- Treat `portable/Install-DataFactory-Portable.ps1` as a prototype requiring hardening, not final authority.
+- Treat `packages/commandhud/` as the current product runtime and test authority.
+- Treat `legacy/commandhud/CommandHud-v21.ps1` as behavioral evidence for the original Windows command surface, not an active launcher.
+- Treat `packages/vscode-extension/` as a retained project/order prototype, not current execution authority.
+- Treat `portable/Install-DataFactory-Portable.ps1` as historical bootstrap evidence, not a distribution path.
+- Keep repository-specific scripts and typed command declarations in their repository; do not copy the generic HUD runtime into projects it operates on.
 
 ## Required change workflow
 
@@ -31,6 +33,6 @@
 6. Package when packaging code changed.
 7. Return commands, exit codes, artifact hashes, unknowns, and the next bounded order.
 
-## Initial scope
+## Current scope
 
-Unify the existing HUD, extension, and portable launcher. Use Digital Breakdown read-only as the first integration fixture. Do not redesign or modify the game.
+Maintain one generic CommandHUD authority and thin project integrations. DATA is an integration fixture whose game code, scripts, adapters, and build policy remain DATA-owned. New frontends must consume the existing runtime state and immutable evidence rather than create parallel execution or history models.
