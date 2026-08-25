@@ -1,0 +1,16 @@
+{
+  "name": "@indrolend/hate-this-meaningless-life",
+  "version": "0.0.0-convergence",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "hud": "./packages/commandhud/cli.mjs",
+    "commandhud": "./packages/commandhud/cli.mjs"
+  },
+  "scripts": {
+    "test": "npm --prefix packages/commandhud test"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

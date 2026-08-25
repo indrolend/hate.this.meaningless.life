@@ -47,10 +47,10 @@ node C:\path\to\hate.this.meaningless.life\packages\commandhud\cli.mjs state --j
 node C:\path\to\hate.this.meaningless.life\packages\commandhud\cli.mjs search currentState tools
 ```
 
-To make `hud` available globally, run this once:
+To make `hud` available globally, run this once from the product clone:
 
 ```powershell
-npm install --global C:\path\to\hate.this.meaningless.life\packages\commandhud
+npm install --global C:\path\to\hate.this.meaningless.life
 ```
 
 Then every Git checkout has the same access point:
@@ -109,7 +109,6 @@ CommandHUD refuses execution outside a Git repository unless an explicit `--root
 ## Verification
 
 ```powershell
-Set-Location .\packages\commandhud
 npm test
 git diff --check
 ```
