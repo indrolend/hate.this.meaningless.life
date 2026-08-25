@@ -2,6 +2,12 @@
 
 `hud` is the persistent local development front door for DATA. It verifies the project root, records Git authority around every command, preserves raw output, and emits a deterministic continuation packet.
 
+## Primary product surface
+
+The terminal TUI launched by `CommandHUD Shell.cmd` or `hud shell` is the primary CommandHUD interface. It owns the shortest supported development loop: paste an ordinary command, execute it against the real local repository, retain immutable evidence, display a condensed result, and copy that result back to an LLM. Robustness, accessibility, and usability work should target this surface first.
+
+The CLI remains first-class automation over the same core. The local server and browser renderer are secondary clients and must continue to consume the same semantic state; they must not become a separate authority or dictate the core architecture.
+
 ## Install the local entrypoint
 
 From the repository root:
@@ -60,9 +66,17 @@ On Windows, `CommandHUD Shell.cmd` at the repository root provides the same term
 ```text
 hud shell
 hud shell --shell bash
+hud shell --no-animation
+"CommandHUD Shell.cmd" --no-animation
+hud shell --plain
+"CommandHUD Shell.cmd" --plain
 ```
 
 The terminal keeps repository-contained cwd changes between commands. `/copy`, `/context`, `/raw`, `/history`, `/undo`, `/shell`, `/cwd`, and `/exit` expose the recorded context and controls without requiring repeated `hud run` wrappers. Undo remains preview-first. Automatic clipboard failure is reported without changing the real command result, and `/copy` retries the last context explicitly.
+
+Interactive sessions reuse the face-state grammar from the original CommandHUD prototype: `(._.)` idle, an eye cycle while running, `(^_^)` pass, `(x_x)` fail, and `(-_-)` stopped. Only the factual status row is replaced in place; the command and evidence remain ordinary terminal text. `--no-animation`, `COMMANDHUD_REDUCED_MOTION=1`, `REDUCE_MOTION=1`, `TERM=dumb`, and noninteractive output disable motion. `NO_COLOR` remains compatible because this first visual slice does not depend on color.
+
+The default interactive interface uses the terminal alternate screen to keep the face/status header, bounded shortened-output panel, copy controls, and input line in stable regions. Its footer enables standard SGR terminal mouse reporting and maps clicks on Copy Output, Raw, Undo, Help, and Exit to the same slash commands available from the keyboard. Mouse reporting is disabled before leaving the alternate screen. Automatic copy and `/copy` remain available when mouse input is unsupported. `--plain` disables the fixed layout and preserves the scrolling interface; use it for screen readers, terminal capture, text selection, or complete scrolling `/raw` inspection.
 
 `hud run` streams the command while writing separate raw stdout and stderr logs. Use `--quiet` when only the final reduced packet is wanted. A nonzero underlying command remains nonzero: `PASS` exits 0, `FAIL` exits 1, `BLOCKED` exits 2, and HUD transport/tooling `ERROR` exits 3.
 

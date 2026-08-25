@@ -6,13 +6,15 @@ import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, reposito
 
 function parse(argv) {
   const args = [...argv];
-  const options = { copy: false, quiet: false, root: null, shell: null, objective: null, request: null, requestB64: null, workflowId: null, workflowName: null, stage: null, stageIndex: null, stageCount: null, json: false, host: '127.0.0.1', port: 8765 };
+  const options = { copy: false, quiet: false, root: null, shell: null, animation: true, tui: true, objective: null, request: null, requestB64: null, workflowId: null, workflowName: null, stage: null, stageIndex: null, stageCount: null, json: false, host: '127.0.0.1', port: 8765 };
   const command = args.shift() || 'context';
   const positionals = [];
   for (let index = 0; index < args.length; index++) {
     const value = args[index];
     if (value === '--') { positionals.push(...args.slice(index + 1)); break; }
     if (value === '--copy' || value === '--copy-packet') options.copy = true;
+    else if (value === '--no-animation') options.animation = false;
+    else if (value === '--plain') options.tui = false;
     else if (value === '--quiet') options.quiet = true;
     else if (value === '--json') options.json = true;
     else if (value === '--lan') options.host = '0.0.0.0';
@@ -150,7 +152,7 @@ async function main() {
   }
   if (command === 'shell') {
     const { startHudShell } = await import('./shell.mjs');
-    await startHudShell(project, { shell: options.shell || undefined });
+    await startHudShell(project, { shell: options.shell || undefined, visual: options.animation, tui: options.tui });
     return;
   }
   if (command === 'serve') {
