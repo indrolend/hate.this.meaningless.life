@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { deliverShellResult, renderShellResult } from './shell.mjs';
@@ -65,7 +66,9 @@ test('clipboard failure is visible without discarding shortened output', () => {
   assert.match(displayed, /NOT COPIED · clipboard unavailable/);
 });
 
-test('Windows repository launcher works from outside its checkout', { skip: process.platform !== 'win32' }, () => {
+test('Windows repository launcher works from outside its checkout', {
+  skip: process.platform !== 'win32' || !existsSync(resolve(import.meta.dirname, '..', '..', 'CommandHUD Shell.cmd')),
+}, () => {
   const root = resolve(import.meta.dirname, '..', '..');
   const launcher = join(root, 'CommandHUD Shell.cmd');
   const result = spawnSync('cmd.exe', ['/d', '/c', launcher], {
