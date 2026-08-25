@@ -81,6 +81,26 @@ An explicit configuration only needs an ID:
 }
 ```
 
+Projects may expose additional typed commands without changing CommandHUD:
+
+```json
+{
+  "id": "owner/project",
+  "commandHud": {
+    "commands": [
+      {
+        "name": "verify-assets",
+        "command": "python tools/verify_assets.py",
+        "argv": ["python", "tools/verify_assets.py"],
+        "owner": "tools/verify_assets.py"
+      }
+    ]
+  }
+}
+```
+
+The browser requests the stable `name`; the runtime rereads the repository declaration, validates its owner path, and executes the recorded `argv`. It does not accept browser-supplied shell text.
+
 CommandHUD refuses execution outside a Git repository unless an explicit `--root` selects one.
 
 ## Verification

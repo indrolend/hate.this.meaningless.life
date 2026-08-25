@@ -20,7 +20,7 @@ There is one runtime state and evidence model. Frontends may request typed opera
 
 CommandHUD verifies the selected directory through `git rev-parse --show-toplevel`. An optional project manifest supplies stable human identity and project-specific metadata. Without a manifest, the Git remote or root name supplies identity.
 
-Repository scripts and files remain the source of discovered commands. Generic CommandHUD code must not copy DATA-specific command catalogs into another authority.
+Repository scripts and files remain the source of discovered commands. Package scripts are discovered mechanically; additional typed commands are declared under `commandHud.commands` in the selected project manifest. Generic CommandHUD code does not copy DATA-specific command catalogs into another authority.
 
 ## State boundary
 

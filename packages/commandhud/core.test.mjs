@@ -29,6 +29,9 @@ test('repository command discovery derives a deterministic inspectable library',
   writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node test.mjs', build: 'node build.mjs' } }));
   mkdirSync(join(root, 'tools'));
   writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), '');
+  writeFileSync(join(root, 'commandhud.project.json'), JSON.stringify({ id: 'fixture/commands', commandHud: { commands: [
+    { name: 'native-tests', command: 'node tools/run-native-tests.mjs', argv: ['node', 'tools/run-native-tests.mjs'], owner: 'tools/run-native-tests.mjs' },
+  ] } }));
   assert.deepEqual(discoverCommands(root), [
     { name: 'npm:build', command: 'npm run build' },
     { name: 'npm:test', command: 'npm run test' },
@@ -36,11 +39,31 @@ test('repository command discovery derives a deterministic inspectable library',
   ]);
 });
 
+test('repository command declarations fail closed when malformed, duplicate, or escaping', () => {
+  const root = mkdtempSync(join(tmpdir(), 'hud-command-validation-'));
+  writeFileSync(join(root, 'package.json'), JSON.stringify({ scripts: { test: 'node test.mjs' } }));
+  const identityPath = join(root, 'commandhud.project.json');
+  const writeCommands = (commands) => writeFileSync(identityPath, JSON.stringify({ id: 'fixture/validation', commandHud: { commands } }));
+
+  writeCommands([{ name: 'broken', command: '', argv: [] }]);
+  assert.throws(() => discoverCommands(root), /Invalid CommandHUD command declaration/);
+
+  writeCommands([{ name: 'npm:test', command: 'node other.mjs', argv: ['node', 'other.mjs'] }]);
+  assert.throws(() => discoverCommands(root), /Duplicate repository command identity/);
+
+  writeCommands([{ name: 'escape', command: 'node outside.mjs', argv: ['node', 'outside.mjs'], owner: '../outside.mjs' }]);
+  assert.throws(() => discoverCommands(root), /owner escapes the repository/);
+});
+
 test('repository command execution resolves a current discovered identity and records evidence', async () => {
   const root = fixture();
   mkdirSync(join(root, 'tools'));
   writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync(new URL("../file.txt", import.meta.url), "changed by command\\n"); console.log("100% tests passed, 0 tests failed out of 3")\n');
-  execFileSync('git', ['add', 'tools/run-native-tests.mjs'], { cwd: root });
+  const identityPath = join(root, 'distribution', 'project.json');
+  const identity = JSON.parse(readFileSync(identityPath, 'utf8'));
+  identity.commandHud = { commands: [{ name: 'native-tests', command: 'node tools/run-native-tests.mjs', argv: ['node', 'tools/run-native-tests.mjs'], owner: 'tools/run-native-tests.mjs' }] };
+  writeFileSync(identityPath, JSON.stringify(identity));
+  execFileSync('git', ['add', 'tools/run-native-tests.mjs', 'distribution/project.json'], { cwd: root });
   execFileSync('git', ['commit', '-m', 'add command fixture'], { cwd: root });
   const project = await resolveProject({ cwd: root, env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'hud-command-state-')) } });
 
@@ -98,7 +121,11 @@ test('repository command cancellation preserves partial changes and reversible e
   const root = fixture();
   mkdirSync(join(root, 'tools'));
   writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync(new URL("../partial.txt", import.meta.url), "partial\\n"); await new Promise((resolve) => setTimeout(resolve, 5000));\n');
-  execFileSync('git', ['add', 'tools/run-native-tests.mjs'], { cwd: root });
+  const identityPath = join(root, 'distribution', 'project.json');
+  const identity = JSON.parse(readFileSync(identityPath, 'utf8'));
+  identity.commandHud = { commands: [{ name: 'native-tests', command: 'node tools/run-native-tests.mjs', argv: ['node', 'tools/run-native-tests.mjs'], owner: 'tools/run-native-tests.mjs' }] };
+  writeFileSync(identityPath, JSON.stringify(identity));
+  execFileSync('git', ['add', 'tools/run-native-tests.mjs', 'distribution/project.json'], { cwd: root });
   execFileSync('git', ['commit', '-m', 'add cancellable fixture'], { cwd: root });
   const project = await resolveProject({ cwd: root, env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'hud-cancel-state-')) } });
   const controller = new AbortController();

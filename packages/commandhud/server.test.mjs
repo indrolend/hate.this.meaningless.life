@@ -16,6 +16,12 @@ function fixtureProject() {
     id: 'indrolend/data',
     channel: 'test',
     manifest: 'https://example.invalid/manifest.json',
+    commandHud: { commands: [{
+      name: 'native-tests',
+      command: 'node tools/run-native-tests.mjs',
+      argv: ['node', 'tools/run-native-tests.mjs'],
+      owner: 'tools/run-native-tests.mjs',
+    }] },
   }));
   writeFileSync(join(root, 'media', 'tone.mp3'), Buffer.from([0x49, 0x44, 0x33, 1, 2, 3, 4, 5]));
   writeFileSync(join(root, 'media', 'tone.wav'), Buffer.from('RIFFtestWAVE'));

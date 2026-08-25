@@ -96,6 +96,14 @@ function projectKey(identity) {
   return identity.id.replace(/[^a-z0-9_-]+/gi, '_').toLowerCase();
 }
 
+function projectIdentityPath(root) {
+  return [
+    join(root, 'commandhud.project.json'),
+    join(root, '.commandhud', 'project.json'),
+    join(root, 'distribution', 'project.json'),
+  ].find((path) => existsSync(path)) || null;
+}
+
 function inferredProjectId(root, remote) {
   const normalized = String(remote || '').trim().replace(/\\/g, '/').replace(/\.git$/i, '');
   const match = normalized.match(/(?:github\.com[/:]|\/)([^/:]+\/[^/]+)$/i);
@@ -107,12 +115,7 @@ export async function verifyRoot(candidate) {
   const rootResult = await exec('git', ['rev-parse', '--show-toplevel'], requested);
   if (!rootResult.ok) throw new Error(`No Git repository found from ${requested}`);
   const root = resolve(rootResult.stdout);
-  const identityPaths = [
-    join(root, 'commandhud.project.json'),
-    join(root, '.commandhud', 'project.json'),
-    join(root, 'distribution', 'project.json'),
-  ];
-  const identityPath = identityPaths.find((path) => existsSync(path));
+  const identityPath = projectIdentityPath(root);
   const declared = identityPath ? readJson(identityPath) : null;
   if (identityPath && (!declared?.id || typeof declared.id !== 'string')) {
     throw new Error(`CommandHUD project identity is invalid: ${identityPath}`);
@@ -323,13 +326,30 @@ function repositoryCommandDefinitions(root) {
   const commands = [];
   const packageJson = readJson(join(root, 'package.json'));
   for (const name of Object.keys(packageJson?.scripts || {}).sort()) commands.push({ name: `npm:${name}`, command: `npm run ${name}`, argv: ['npm', 'run', name] });
-  const adapters = [
-    ['assets', 'python tools/verify_asset_mirrors.py', ['python', 'tools/verify_asset_mirrors.py'], 'tools/verify_asset_mirrors.py'],
-    ['native-tests', 'node tools/run-native-tests.mjs', ['node', 'tools/run-native-tests.mjs'], 'tools/run-native-tests.mjs'],
-    ['multiplayer', 'npm --prefix multiplayer-server run check', ['npm', '--prefix', 'multiplayer-server', 'run', 'check'], 'multiplayer-server/package.json'],
-    ['multiplayer-dry-deploy', 'npm --prefix multiplayer-server run deploy:dry', ['npm', '--prefix', 'multiplayer-server', 'run', 'deploy:dry'], 'multiplayer-server/package.json'],
-  ];
-  for (const [name, command, argv, owner] of adapters) if (existsSync(join(root, owner))) commands.push({ name, command, argv });
+  const identityPath = projectIdentityPath(root);
+  const configured = identityPath ? readJson(identityPath)?.commandHud?.commands : null;
+  if (configured !== null && configured !== undefined && !Array.isArray(configured)) {
+    throw new Error('commandHud.commands must be an array.');
+  }
+  for (const entry of configured || []) {
+    const name = typeof entry?.name === 'string' ? entry.name.trim() : '';
+    const command = typeof entry?.command === 'string' ? entry.command.trim() : '';
+    const argv = entry?.argv;
+    const owner = typeof entry?.owner === 'string' ? entry.owner.replaceAll('\\', '/') : null;
+    if (!/^[a-z0-9][a-z0-9:._-]*$/i.test(name) || !command || !Array.isArray(argv) || !argv.length || argv.some((value) => typeof value !== 'string' || !value)) {
+      throw new Error(`Invalid CommandHUD command declaration: ${name || '(unnamed)'}`);
+    }
+    if (owner) {
+      const ownerPath = resolve(root, owner);
+      const ownerRelative = relative(root, ownerPath);
+      if (isAbsolute(ownerRelative) || ownerRelative === '..' || ownerRelative.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`)) {
+        throw new Error(`CommandHUD command owner escapes the repository: ${owner}`);
+      }
+      if (!existsSync(ownerPath)) continue;
+    }
+    if (commands.some((item) => item.name === name)) throw new Error(`Duplicate repository command identity: ${name}`);
+    commands.push({ name, command, argv: [...argv] });
+  }
   return commands;
 }
 
