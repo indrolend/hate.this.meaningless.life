@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildOperationContext, filesystemIdentity, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildOperationContext, filesystemIdentity, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 function parse(argv) {
   const args = [...argv];
@@ -369,6 +369,19 @@ async function main() {
         ? { mode: command, pattern: args[1], context: args[2] }
         : { mode: command, count: args[1] });
     return options.json ? console.log(JSON.stringify(projection, null, 2)) : printEvidenceProjection(projection);
+  }
+  if (command === 'diff') {
+    if (!args[0] || !args[1]) throw new Error('hud diff requires two recorded run IDs.');
+    const value = await diffRunEvidence(project, args[0], args[1]);
+    if (options.json) return console.log(JSON.stringify(value, null, 2));
+    console.log(`RUN_DIFF ${value.leftRunId} -> ${value.rightRunId}`);
+    console.log(`DIFFERENT ${value.different}`);
+    for (const stream of value.streams) {
+      console.log(`\n${stream.stream.toUpperCase()}${stream.different ? ' CHANGED' : ' UNCHANGED'}`);
+      if (stream.text) console.log(stream.text);
+      if (stream.truncated) console.log('[bounded: complete evidence remains in both runs]');
+    }
+    return;
   }
   if (command === 'copy') {
     const runId = args[0];

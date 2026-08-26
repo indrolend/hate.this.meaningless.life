@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, compareFilesystemFiles, continuation, currentState, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, gitSnapshot, operationDetail, operationHistory, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
+import { buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, compareFilesystemFiles, continuation, currentState, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, gitSnapshot, operationDetail, operationHistory, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -61,6 +61,24 @@ test('recorded evidence projections reject missing runs and invalid requests', a
   assert.throws(() => projectRunEvidence(project, record.id, { mode: 'head', count: 0 }), /line count from 1 to 500/);
   assert.throws(() => projectRunEvidence(project, record.id, { mode: 'find', pattern: '' }), /non-empty pattern/);
   assert.throws(() => projectRunEvidence(project, record.id, { mode: 'different' }), /Unknown evidence projection/);
+});
+
+test('run evidence diff compares immutable streams without rerunning either command', async () => {
+  const project = await fixtureProject();
+  const counter = join(project.root, 'diff-counter.txt');
+  const command = (value) => [process.execPath, '-e', `const fs=require('node:fs');const p=${JSON.stringify(counter)};fs.appendFileSync(p,'x');console.log(${JSON.stringify(value)});console.error('stable warning')`];
+  const left = await runCommand(project, command('alpha'));
+  const right = await runCommand(project, command('beta'));
+  assert.equal(readFileSync(counter, 'utf8'), 'xx');
+  const value = await diffRunEvidence(project, left.id, right.id);
+  assert.equal(readFileSync(counter, 'utf8'), 'xx');
+  assert.equal(value.different, true);
+  assert.equal(value.streams[0].different, true);
+  assert.match(value.streams[0].text, /-alpha/);
+  assert.match(value.streams[0].text, /\+beta/);
+  assert.doesNotMatch(value.streams[0].text, /CommandHud|stdout\.log/);
+  assert.equal(value.streams[1].different, false);
+  assert.equal(value.streams[1].text, '');
 });
 
 test('filesystem identity reports real bytes and file comparison avoids metadata guesses', () => {

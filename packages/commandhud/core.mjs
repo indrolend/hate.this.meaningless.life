@@ -1606,6 +1606,39 @@ export function projectRunEvidence(project, id, { mode = 'raw', count, pattern, 
   };
 }
 
+export async function diffRunEvidence(project, leftId, rightId, { maxLines = 500, maxChars = 64 * 1024 } = {}) {
+  projectRunEvidence(project, leftId);
+  projectRunEvidence(project, rightId);
+  const boundedLines = boundedEvidenceNumber(maxLines, 500, 'diff');
+  if (!Number.isInteger(maxChars) || maxChars < 1024 || maxChars > 1024 * 1024) throw new Error('hud diff requires a character bound from 1024 to 1048576.');
+  const runRoot = join(project.store, 'runs', project.key);
+  const streams = [];
+  for (const stream of ['stdout', 'stderr']) {
+    const leftPath = join(runRoot, leftId, `${stream}.log`);
+    const rightPath = join(runRoot, rightId, `${stream}.log`);
+    const result = await exec('git', ['diff', '--no-index', '--no-ext-diff', '--unified=3', '--', leftPath, rightPath], project.root, { trim: false });
+    if (result.code > 1) throw new Error(`Unable to compare recorded ${stream}: ${result.stderr}`);
+    const normalized = result.stdout.split(/\r?\n/).map((line) => {
+      if (line.startsWith('diff --git ')) return `diff --git a/${stream}:${leftId} b/${stream}:${rightId}`;
+      if (line.startsWith('--- ')) return `--- ${stream}:${leftId}`;
+      if (line.startsWith('+++ ')) return `+++ ${stream}:${rightId}`;
+      return line;
+    }).join('\n');
+    const lines = evidenceLines(normalized);
+    let selected = lines.slice(0, boundedLines);
+    let text = selected.join('\n');
+    let truncated = selected.length < lines.length;
+    if (text.length > maxChars) { text = text.slice(0, maxChars); truncated = true; }
+    streams.push({ stream, different: result.code === 1, totalLines: lines.length, truncated, text });
+  }
+  return {
+    leftRunId: leftId,
+    rightRunId: rightId,
+    different: streams.some((stream) => stream.different),
+    streams,
+  };
+}
+
 export async function operationHistory(project, limit = 25) {
   const bounded = Math.max(1, Math.min(100, Number(limit) || 25));
   const currency = await repositoryCurrency(project.root, project.identity.id);

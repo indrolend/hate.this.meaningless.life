@@ -3,7 +3,7 @@ import { basename, relative } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { PassThrough } from 'node:stream';
 import {
-  buildOperationContext, discoverShells, lastRun, listRuns, projectRunEvidence, runById,
+  buildOperationContext, diffRunEvidence, discoverShells, lastRun, listRuns, projectRunEvidence, runById,
   runTerminalCommand, undoOperation, undoPlan,
 } from './core.mjs';
 import { createShellVisualStatus, IDLE_FACE, visualMotionEnabled } from './shell-visual.mjs';
@@ -82,6 +82,7 @@ function help() {
     '/tail [n]      show the last recorded lines without rerunning',
     '/find <text>   find literal text in recorded evidence',
     '/around <text> [n]  show recorded lines around matches',
+    '/diff <run> <run>  compare two retained stdout/stderr records',
     'Add a run ID after the command to inspect an older run.',
     '/history [n]   list a bounded number of recorded operations',
     '/undo          inspect the latest command for safe Undo',
@@ -219,6 +220,23 @@ export async function startHudShell(project, {
           const value = projectRunEvidence(project, request.runId, request);
           show(`${renderShellEvidenceProjection(value)}\n\n`);
         } catch (error) { show(`${error.message}\n\n`); }
+        continue;
+      }
+      if (/^\/diff(?:\s|$)/.test(command)) {
+        const [, left, right] = command.split(/\s+/, 3);
+        if (!left || !right) show('/diff requires two recorded run IDs.\n\n');
+        else {
+          try {
+            const value = await diffRunEvidence(project, left, right);
+            const lines = [`RUN_DIFF ${left} -> ${right}`, `DIFFERENT ${value.different}`];
+            for (const stream of value.streams) {
+              lines.push('', `${stream.stream.toUpperCase()} ${stream.different ? 'CHANGED' : 'UNCHANGED'}`);
+              if (stream.text) lines.push(stream.text);
+              if (stream.truncated) lines.push('… complete evidence remains in both runs');
+            }
+            show(`${lines.join('\n')}\n\n`);
+          } catch (error) { show(`${error.message}\n\n`); }
+        }
         continue;
       }
       if (/^\/history(?:\s|$)/.test(command)) {

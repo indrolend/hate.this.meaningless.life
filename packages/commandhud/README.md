@@ -57,6 +57,7 @@ hud head <run-id> [lines]
 hud tail <run-id> [lines]
 hud find <run-id> <literal-pattern>
 hud around <run-id> <literal-pattern> [context-lines]
+hud diff <left-run-id> <right-run-id>
 hud copy <run-id>
 hud file-identity <path>
 hud compare-files <source-path> <runtime-path>
@@ -90,7 +91,7 @@ hud shell --tui
 "CommandHUD Shell.cmd" --tui
 ```
 
-The terminal keeps repository-contained cwd changes between commands. `/copy`, `/context`, `/raw`, `/head`, `/tail`, `/find`, `/around`, `/history`, `/undo`, `/shell`, `/cwd`, and `/exit` expose the recorded context and controls without requiring repeated `hud run` wrappers. Evidence, context, and copy commands default to the latest run and accept an explicit run ID for older evidence; they never rerun the original command. `/history [n]` lists 1–100 records without turning the active window into scrollback. Undo remains preview-first. Clipboard failure is reported without changing the real command result or terminating the shell.
+The terminal keeps repository-contained cwd changes between commands. `/copy`, `/context`, `/raw`, `/head`, `/tail`, `/find`, `/around`, `/diff`, `/history`, `/undo`, `/shell`, `/cwd`, and `/exit` expose the recorded context and controls without requiring repeated `hud run` wrappers. Evidence, context, and copy commands default to the latest run and accept an explicit run ID for older evidence; they never rerun the original command. `/diff <run> <run>` compares retained stdout and stderr through Git's existing diff primitive. `/history [n]` lists 1–100 records without turning the active window into scrollback. Undo remains preview-first. Clipboard failure is reported without changing the real command result or terminating the shell.
 
 Interactive sessions reuse the face-state grammar from the original CommandHUD prototype: `(._.)` idle, an eye cycle while running, `(^_^)` pass, `(x_x)` fail, and `(-_-)` stopped. Only the factual status row is replaced in place; the command and evidence remain ordinary terminal text. `--no-animation`, `COMMANDHUD_REDUCED_MOTION=1`, `REDUCE_MOTION=1`, `TERM=dumb`, and noninteractive output disable motion. `NO_COLOR` remains compatible because this first visual slice does not depend on color.
 
