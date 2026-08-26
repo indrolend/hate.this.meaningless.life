@@ -67,6 +67,8 @@ hud tools
 hud update
 ```
 
+`hud compare-files` is an immutable typed operation: it records both absolute identities, exact SHA-256 values, equality status, raw JSON, process outcome, and repository currency. Absolute paths allow source-to-built or source-to-installed comparisons; filenames, sizes, and timestamps never substitute for byte equality.
+
 On Windows, `hud service <name>` performs a validated read-only service probe and records status, start type, process identity, dependencies, dependents, raw JSON, and Git currency as one immutable operation. The runtime owns the encoded PowerShell transport; the caller supplies only a restricted service name, never executable text.
 
 `hud service-reset-plan <name>` recursively observes dependent services and records a deterministic dependent-first stop order and reverse start order. It excludes previously stopped dependents from both actions and reports running services that cannot stop as blockers. This operation is planning only and never changes service state.

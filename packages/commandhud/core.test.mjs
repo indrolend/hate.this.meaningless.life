@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, compareFilesystemFiles, continuation, currentState, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, gitSnapshot, operationDetail, operationHistory, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
+import { buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, compareFilesystemFiles, continuation, currentState, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, gitSnapshot, operationDetail, operationHistory, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -98,6 +98,27 @@ test('filesystem comparison reports missing and non-file inputs without claiming
   assert.equal(directoryComparison.status, 'not-files');
   assert.equal(directoryComparison.sameBytes, null);
   assert.throws(() => filesystemIdentity(''), /valid path/);
+});
+
+test('filesystem comparison operation preserves exact identities and compact handoff in immutable evidence', async () => {
+  const project = await fixtureProject();
+  const left = join(project.root, 'left.bin');
+  const right = join(project.root, 'right.bin');
+  writeFileSync(left, 'same bytes');
+  writeFileSync(right, 'same bytes');
+  const record = await recordFilesystemComparison(project, 'left.bin', 'right.bin');
+  assert.equal(record.status, 'pass');
+  assert.equal(record.operation.type, 'filesystem-comparison');
+  assert.equal(record.operation.comparison.status, 'identical');
+  assert.equal(record.operation.comparison.sameBytes, true);
+  assert.match(record.operation.comparison.left.sha256, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(record.operation.comparison.left.sha256, record.operation.comparison.right.sha256);
+  assert.match(readFileSync(record.stdoutPath, 'utf8'), /"status":"identical"/);
+  assert.equal(readFileSync(record.stderrPath, 'utf8'), '');
+  const handoff = buildOperationHandoff(project, record);
+  assert.match(handoff, /BYTE_STATUS identical/);
+  assert.match(handoff, /SAME_BYTES true/);
+  assert.match(handoff, new RegExp(`RAW run:${record.id}`));
 });
 
 test('result markers parse only the narrow opted-in line grammar with factual provenance', () => {

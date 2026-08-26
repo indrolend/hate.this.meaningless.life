@@ -327,6 +327,31 @@ export function compareFilesystemFiles(leftPath, rightPath, { base = process.cwd
   };
 }
 
+export async function recordFilesystemComparison(project, leftPath, rightPath, { stream = false } = {}) {
+  if (typeof leftPath !== 'string' || typeof rightPath !== 'string') throw new Error('hud compare-files requires two filesystem paths.');
+  const moduleUrl = new URL('./core.mjs', import.meta.url).href;
+  const script = `import { compareFilesystemFiles } from ${JSON.stringify(moduleUrl)};process.stdout.write(JSON.stringify(compareFilesystemFiles(process.argv[1],process.argv[2],{base:process.argv[3]})))`;
+  return runCommand(project, [process.execPath, '--input-type=module', '-e', script, leftPath, rightPath, project.root], {
+    request: `compare filesystem bytes ${leftPath} and ${rightPath}`,
+    objective: 'Record byte-level source/runtime identity comparison',
+    stream,
+    shell: false,
+    operationIdentity: { type: 'filesystem-comparison' },
+    operationReducer: ({ stdout, command, record }) => {
+      let comparison = null;
+      if (record.exitCode === 0) {
+        try { comparison = JSON.parse(String(stdout || '').trim()); }
+        catch { throw new Error('Filesystem comparison probe did not return valid JSON evidence.'); }
+      }
+      return {
+        type: 'filesystem-comparison', command,
+        displayCommand: `compare-files ${leftPath} ${rightPath}`,
+        status: record.status, exitCode: record.exitCode, durationMs: record.durationMs, comparison,
+      };
+    },
+  });
+}
+
 export function parseWindowsServiceObservation(stdout) {
   let value;
   try { value = JSON.parse(String(stdout || '').trim()); }
@@ -1281,6 +1306,17 @@ export function buildOperationContext(project, record) {
       lines.push(`MISSING ${operation.plan.missing.join(',') || 'none'}`);
       lines.push(`STOP_ORDER ${operation.plan.stop.join(' -> ') || 'none'}`);
       lines.push(`START_ORDER ${operation.plan.start.join(' -> ') || 'none'}`);
+    }
+  } else if (operation.type === 'filesystem-comparison') {
+    lines.push(`COMMAND ${operation.displayCommand}`);
+    lines.push(`RESULT ${operation.status.toUpperCase()} exit=${operation.exitCode} duration=${operation.durationMs}ms`);
+    if (operation.comparison) {
+      lines.push(`BYTE_STATUS ${operation.comparison.status}`);
+      lines.push(`SAME_BYTES ${operation.comparison.sameBytes}`);
+      lines.push(`LEFT ${operation.comparison.left.path}`);
+      lines.push(`LEFT_SHA256 ${operation.comparison.left.sha256 || 'none'}`);
+      lines.push(`RIGHT ${operation.comparison.right.path}`);
+      lines.push(`RIGHT_SHA256 ${operation.comparison.right.sha256 || 'none'}`);
     }
   } else {
     lines.push(`COMMAND ${operation.command || record.command}`);

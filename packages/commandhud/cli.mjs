@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildOperationContext, compareFilesystemFiles, filesystemIdentity, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildOperationContext, filesystemIdentity, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 function parse(argv) {
   const args = [...argv];
@@ -144,11 +144,13 @@ async function main() {
   }
   if (command === 'compare-files') {
     if (!args[0] || !args[1]) throw new Error('hud compare-files requires two filesystem paths.');
-    const value = compareFilesystemFiles(args[0], args[1], { base: project.root });
-    if (options.json) return console.log(JSON.stringify(value, null, 2));
-    printObject({ status: value.status, same_bytes: value.sameBytes });
-    console.log('LEFT'); printObject(value.left);
-    console.log('RIGHT'); printObject(value.right);
+    const record = await recordFilesystemComparison(project, args[0], args[1]);
+    const value = record.operation.comparison;
+    if (options.json) return console.log(JSON.stringify({ runId: record.id, status: record.status, operation: record.operation, stdoutPath: record.stdoutPath, stderrPath: record.stderrPath }, null, 2));
+    printObject({ status: value?.status || record.status, same_bytes: value?.sameBytes ?? 'unknown' });
+    if (value) { console.log('LEFT'); printObject(value.left); console.log('RIGHT'); printObject(value.right); }
+    console.log(`RAW run:${record.id}`);
+    process.exitCode = record.status === 'pass' ? 0 : record.status === 'blocked' ? 2 : 1;
     return;
   }
   if (command === 'service') {
