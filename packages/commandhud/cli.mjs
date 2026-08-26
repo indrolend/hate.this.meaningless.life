@@ -3,6 +3,37 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildOperationContext, filesystemIdentity, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
+const HELP = `hate.this.meaningless.life · context condenser
+
+Run from any Git repository:
+  hud shell                         interactive terminal + compact clipboard result
+  hud run -- <command>              record one command and print a compact packet
+  hud state [--json]                current repository and last-operation state
+  hud search <query> [scope]        recorded ripgrep search
+  hud tools                         discovered tools and repository commands
+  hud repository-command <name>    run a repository-owned typed command
+
+Retained evidence (never reruns the command):
+  hud history [count]
+  hud handoff [--copy]
+  hud raw|head|tail <run> [count]
+  hud find <run> <pattern>
+  hud around <run> <pattern> [lines]
+  hud diff <run-a> <run-b>
+  hud copy <run>
+
+Safety and authority:
+  hud undo-plan <run>               inspect whether a worktree reversal is safe
+  hud undo <run>                    apply an evidence-backed worktree reversal
+  hud file-identity <path>
+  hud compare-files <left> <right>
+
+Other clients:
+  hud desktop                       Windows app window
+  hud serve                         loopback typed-operation server
+
+Use --root <path> to select an explicit Git repository.`;
+
 function parse(argv) {
   const args = [...argv];
   const options = { copy: false, quiet: false, root: null, shell: null, animation: true, tui: false, objective: null, request: null, requestB64: null, workflowId: null, workflowName: null, stage: null, stageIndex: null, stageCount: null, json: false, host: '127.0.0.1', port: 8765 };
@@ -108,6 +139,10 @@ function renderContinue(value) {
 
 async function main() {
   const { command, args, options } = parse(process.argv.slice(2));
+  if (['help', '--help', '-h'].includes(command)) {
+    console.log(HELP);
+    return;
+  }
   const project = await resolveProject({ root: options.root });
   if (command === 'context' || command === 'status') return context(project, options.json);
   if (command === 'state') {
