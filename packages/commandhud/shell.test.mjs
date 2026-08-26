@@ -4,7 +4,28 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { deliverShellResult, renderShellResult } from './shell.mjs';
+import { deliverShellResult, parseShellEvidenceCommand, renderShellEvidenceProjection, renderShellResult } from './shell.mjs';
+
+test('terminal evidence commands target the latest or an explicit immutable run', () => {
+  const runId = '20260826010101-abcd';
+  const older = '20260825020202-1234';
+  assert.deepEqual(parseShellEvidenceCommand('/head 12', runId), { runId, mode: 'head', count: '12' });
+  assert.deepEqual(parseShellEvidenceCommand(`/tail ${older} 5`, runId), { runId: older, mode: 'tail', count: '5' });
+  assert.deepEqual(parseShellEvidenceCommand('/find exact useful text', runId), { runId, mode: 'find', pattern: 'exact useful text' });
+  assert.deepEqual(parseShellEvidenceCommand(`/around ${older} failure 3`, runId), { runId: older, mode: 'around', pattern: 'failure', context: '3' });
+  assert.throws(() => parseShellEvidenceCommand('/raw', null), /No command has been recorded/);
+});
+
+test('terminal evidence projection keeps stream and factual line identity visible', () => {
+  const rendered = renderShellEvidenceProjection({
+    runId: '20260826010101-abcd', mode: 'find', streams: [
+      { stream: 'stdout', matchCount: 1, lines: [{ number: 7, text: 'needle' }] },
+      { stream: 'stderr', matchCount: 0, lines: [], truncated: false },
+    ],
+  });
+  assert.match(rendered, /STDOUT · 1 matches\n7: needle/);
+  assert.match(rendered, /STDERR · 0 matches\n\(no matching lines\)/);
+});
 
 test('terminal shell renders compact measured context without replacing raw evidence', () => {
   const root = join('C:', 'fixture', 'repo');
@@ -64,6 +85,29 @@ test('clipboard failure is visible without discarding shortened output', () => {
   assert.equal(result.copied, false);
   assert.match(displayed, /SHORTENED OUTPUT/);
   assert.match(displayed, /NOT COPIED · clipboard unavailable/);
+});
+
+test('terminal shell keeps running when automatic clipboard delivery fails', () => {
+  const productRoot = resolve(import.meta.dirname, '..', '..');
+  const root = mkdtempSync(join(tmpdir(), 'commandhud-shell-copy-'));
+  execFileSync('git', ['init', '-b', 'main'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'hud@example.invalid'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'HUD Test'], { cwd: root });
+  execFileSync('git', ['commit', '--allow-empty', '-m', 'fixture'], { cwd: root });
+  const script = `
+    import { PassThrough } from 'node:stream';
+    import { resolveProject } from ${JSON.stringify(new URL('./core.mjs', import.meta.url).href)};
+    import { startHudShell } from ${JSON.stringify(new URL('./shell.mjs', import.meta.url).href)};
+    const input = new PassThrough(); let output = '';
+    input.end('echo first\\n/copy\\n/exit\\n');
+    const project = await resolveProject({ root: ${JSON.stringify(root)}, env: { ...process.env, HUD_STATE_ROOT: ${JSON.stringify(join(root, '.state'))} } });
+    await startHudShell(project, { input, output: { write(value) { output += value; } }, clipboardWriter() { throw new Error('clipboard unavailable'); }, visual: false });
+    process.stdout.write(output);
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: productRoot, encoding: 'utf8', timeout: 15000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /NOT COPIED · clipboard unavailable/);
+  assert.match(result.stdout, /Context remains available with \/context/);
 });
 
 test('Windows repository launcher works from outside its checkout', {

@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildOperationContext, buildOperationHandoff, buildPacket, buildWorkflowPacket, classifyEvidence, continuation, currentState, discoverCommands, discoverShells, fetchUpdate, formatPacket, gitSnapshot, operationDetail, operationHistory, parseSearchOutput, readProjectState, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
+import { buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, compareFilesystemFiles, continuation, currentState, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, gitSnapshot, operationDetail, operationHistory, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -23,6 +23,133 @@ function fixtureProject() {
   const root = fixture();
   return resolveProject({ cwd: root, env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'hud-state-')) } });
 }
+
+test('recorded evidence supports raw and bounded projections without rerunning', async () => {
+  const project = await fixtureProject();
+  const marker = join(project.root, 'projection-count.txt');
+  const script = `const fs=require('node:fs');const p=${JSON.stringify(marker)};fs.writeFileSync(p,String((Number(fs.existsSync(p)&&fs.readFileSync(p,'utf8'))||0)+1));console.log('alpha');console.log('needle');console.log('omega');console.error('warning needle')`;
+  const record = await runCommand(project, [process.execPath, '-e', script]);
+  assert.equal(readFileSync(marker, 'utf8'), '1');
+
+  const raw = projectRunEvidence(project, record.id);
+  assert.match(raw.streams[0].content, /alpha\nneedle\nomega/);
+  assert.match(raw.streams[1].content, /warning needle/);
+  assert.equal(readFileSync(marker, 'utf8'), '1');
+
+  assert.deepEqual(projectRunEvidence(project, record.id, { mode: 'head', count: 2 }).streams[0].lines, [
+    { number: 1, text: 'alpha' }, { number: 2, text: 'needle' },
+  ]);
+  assert.deepEqual(projectRunEvidence(project, record.id, { mode: 'tail', count: 2 }).streams[0].lines, [
+    { number: 2, text: 'needle' }, { number: 3, text: 'omega' },
+  ]);
+  assert.deepEqual(projectRunEvidence(project, record.id, { mode: 'find', pattern: 'needle' }).streams.map((stream) => ({
+    stream: stream.stream, matches: stream.matchCount, lines: stream.lines,
+  })), [
+    { stream: 'stdout', matches: 1, lines: [{ number: 2, text: 'needle' }] },
+    { stream: 'stderr', matches: 1, lines: [{ number: 1, text: 'warning needle' }] },
+  ]);
+  assert.deepEqual(projectRunEvidence(project, record.id, { mode: 'around', pattern: 'needle', context: 1 }).streams[0].lines, [
+    { number: 1, text: 'alpha' }, { number: 2, text: 'needle' }, { number: 3, text: 'omega' },
+  ]);
+  assert.equal(readFileSync(marker, 'utf8'), '1');
+});
+
+test('recorded evidence projections reject missing runs and invalid requests', async () => {
+  const project = await fixtureProject();
+  assert.throws(() => projectRunEvidence(project, '20260101000000-abcd'), /No recorded run/);
+  const record = await runCommand(project, [process.execPath, '-e', 'console.log("ok")']);
+  assert.throws(() => projectRunEvidence(project, record.id, { mode: 'head', count: 0 }), /line count from 1 to 500/);
+  assert.throws(() => projectRunEvidence(project, record.id, { mode: 'find', pattern: '' }), /non-empty pattern/);
+  assert.throws(() => projectRunEvidence(project, record.id, { mode: 'different' }), /Unknown evidence projection/);
+});
+
+test('filesystem identity reports real bytes and file comparison avoids metadata guesses', () => {
+  const root = mkdtempSync(join(tmpdir(), 'hud-file-identity-'));
+  const left = join(root, 'left.bin');
+  const same = join(root, 'same.bin');
+  const different = join(root, 'different.bin');
+  writeFileSync(left, Buffer.from([0, 1, 2, 255]));
+  writeFileSync(same, Buffer.from([0, 1, 2, 255]));
+  writeFileSync(different, Buffer.from([0, 1, 3, 255]));
+
+  const identity = filesystemIdentity('left.bin', { base: root });
+  assert.equal(identity.path, left);
+  assert.equal(identity.exists, true);
+  assert.equal(identity.type, 'file');
+  assert.equal(identity.size, 4);
+  assert.match(identity.mtime, /^\d{4}-\d\d-\d\dT/);
+  assert.match(identity.sha256, /^sha256:[0-9a-f]{64}$/);
+  assert.equal(compareFilesystemFiles(left, same).status, 'identical');
+  assert.equal(compareFilesystemFiles(left, same).sameBytes, true);
+  assert.equal(compareFilesystemFiles(left, different).status, 'different');
+  assert.equal(compareFilesystemFiles(left, different).sameBytes, false);
+});
+
+test('filesystem comparison reports missing and non-file inputs without claiming byte equality', () => {
+  const root = mkdtempSync(join(tmpdir(), 'hud-file-boundaries-'));
+  const file = join(root, 'file.txt');
+  writeFileSync(file, 'content');
+  assert.deepEqual(filesystemIdentity('missing.txt', { base: root }), {
+    path: join(root, 'missing.txt'), exists: false, type: 'missing', size: null, mtime: null, sha256: null,
+  });
+  assert.deepEqual(compareFilesystemFiles(file, join(root, 'missing.txt')).status, 'right-missing');
+  assert.deepEqual(compareFilesystemFiles(join(root, 'one'), join(root, 'two')).status, 'both-missing');
+  const directoryComparison = compareFilesystemFiles(root, file);
+  assert.equal(directoryComparison.status, 'not-files');
+  assert.equal(directoryComparison.sameBytes, null);
+  assert.throws(() => filesystemIdentity(''), /valid path/);
+});
+
+test('result markers parse only the narrow opted-in line grammar with factual provenance', () => {
+  assert.deepEqual(parseResultMarkers(
+    'noise\nASSET_MIRRORS=PASS count=7 target=native\nBAD=UNKNOWN value=1\nDUPLICATE=PASS x=1 x=2\n',
+    'MULTIPLAYER_PARITY=FAIL room=alpha\n',
+  ), [
+    { event: 'ASSET_MIRRORS', status: 'PASS', fields: { count: '7', target: 'native' }, stream: 'stdout', line: 2, raw: 'ASSET_MIRRORS=PASS count=7 target=native' },
+    { event: 'MULTIPLAYER_PARITY', status: 'FAIL', fields: { room: 'alpha' }, stream: 'stderr', line: 1, raw: 'MULTIPLAYER_PARITY=FAIL room=alpha' },
+  ]);
+  assert.deepEqual(reduceOutput('type source.txt', 'ASSET_MIRRORS=PASS count=7', '', 0).markers, []);
+  assert.equal(reduceOutput('declared adapter', 'ASSET_MIRRORS=PASS count=7', '', 0, { resultMarkers: true }).markers.length, 1);
+});
+
+test('Windows service evidence parser validates and normalizes factual probe output', () => {
+  assert.deepEqual(parseWindowsServiceObservation(JSON.stringify({
+    name: 'Spooler', displayName: 'Print Spooler', status: 'Running', startType: 'Automatic',
+    canStop: true, processId: 123, dependsOn: ['RPCSS'], dependents: ['VPDAgent', 'VPDAgent'],
+  })), {
+    name: 'Spooler', displayName: 'Print Spooler', status: 'Running', startType: 'Automatic',
+    canStop: true, processId: 123, dependsOn: ['RPCSS'], dependents: ['VPDAgent'],
+  });
+  assert.throws(() => parseWindowsServiceObservation('not json'), /valid JSON/);
+  assert.throws(() => parseWindowsServiceObservation('{"name":"Spooler"}'), /malformed evidence/);
+});
+
+test('Windows service reset plan stops running dependents first and restores only prior running state', () => {
+  const service = (name, status, canStop, dependents = []) => ({
+    name, displayName: name, status, startType: 'Automatic', canStop, processId: status === 'Running' ? 10 : 0,
+    dependsOn: [], dependents,
+  });
+  assert.deepEqual(buildWindowsServiceResetPlan([
+    service('Spooler', 'Running', true, ['Fax', 'VPDAgent']),
+    service('Fax', 'Stopped', false),
+    service('VPDAgent', 'Running', true, ['PrintMonitor']),
+    service('PrintMonitor', 'Running', true),
+  ], 'Spooler'), {
+    target: 'Spooler', safe: true, blockers: [], missing: [],
+    stop: ['PrintMonitor', 'VPDAgent', 'Spooler'],
+    start: ['Spooler', 'VPDAgent', 'PrintMonitor'],
+    observed: [
+      service('Fax', 'Stopped', false), service('PrintMonitor', 'Running', true),
+      service('Spooler', 'Running', true, ['Fax', 'VPDAgent']), service('VPDAgent', 'Running', true, ['PrintMonitor']),
+    ],
+  });
+  const blocked = buildWindowsServiceResetPlan([service('Spooler', 'Running', true, ['Agent']), service('Agent', 'Running', false)], 'Spooler');
+  assert.equal(blocked.safe, false);
+  assert.deepEqual(blocked.blockers, ['Agent']);
+  const incomplete = buildWindowsServiceResetPlan([service('Spooler', 'Running', true, ['UnknownAgent'])], 'Spooler');
+  assert.equal(incomplete.safe, false);
+  assert.deepEqual(incomplete.missing, ['UnknownAgent']);
+});
 
 test('repository command discovery derives a deterministic inspectable library', () => {
   const root = mkdtempSync(join(tmpdir(), 'hud-commands-'));
@@ -54,6 +181,9 @@ test('repository command declarations fail closed when malformed, duplicate, or 
   writeCommands([{ name: 'kind', command: 'node kind.mjs', argv: ['node', 'kind.mjs'], kind: 'build' }]);
   assert.throws(() => discoverCommands(root), /Invalid CommandHUD command kind/);
 
+  writeCommands([{ name: 'markers', command: 'node markers.mjs', argv: ['node', 'markers.mjs'], resultMarkers: 'yes' }]);
+  assert.throws(() => discoverCommands(root), /Invalid CommandHUD result marker declaration/);
+
   writeCommands([{ name: 'npm:test', command: 'node other.mjs', argv: ['node', 'other.mjs'] }]);
   assert.throws(() => discoverCommands(root), /Duplicate repository command identity/);
 
@@ -64,10 +194,10 @@ test('repository command declarations fail closed when malformed, duplicate, or 
 test('repository command execution resolves a current discovered identity and records evidence', async () => {
   const root = fixture();
   mkdirSync(join(root, 'tools'));
-  writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync(new URL("../file.txt", import.meta.url), "changed by command\\n"); console.log("100% tests passed, 0 tests failed out of 3")\n');
+  writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'import { writeFileSync } from "node:fs"; writeFileSync(new URL("../file.txt", import.meta.url), "changed by command\\n"); console.log("100% tests passed, 0 tests failed out of 3"); console.log("NATIVE_TESTS=PASS count=3")\n');
   const identityPath = join(root, 'distribution', 'project.json');
   const identity = JSON.parse(readFileSync(identityPath, 'utf8'));
-  identity.commandHud = { commands: [{ name: 'native-tests', command: 'node tools/run-native-tests.mjs', argv: ['node', 'tools/run-native-tests.mjs'], owner: 'tools/run-native-tests.mjs', kind: 'test' }] };
+  identity.commandHud = { commands: [{ name: 'native-tests', command: 'node tools/run-native-tests.mjs', argv: ['node', 'tools/run-native-tests.mjs'], owner: 'tools/run-native-tests.mjs', kind: 'test', resultMarkers: true }] };
   writeFileSync(identityPath, JSON.stringify(identity));
   execFileSync('git', ['add', 'tools/run-native-tests.mjs', 'distribution/project.json'], { cwd: root });
   execFileSync('git', ['commit', '-m', 'add command fixture'], { cwd: root });
@@ -80,6 +210,7 @@ test('repository command execution resolves a current discovered identity and re
   assert.equal(record.operation.displayCommand, 'node tools/run-native-tests.mjs');
   assert.equal(record.operation.command, 'node tools/run-native-tests.mjs');
   assert.deepEqual(record.operation.summary, ['3/3 CTest']);
+  assert.deepEqual(record.operation.markers, [{ event: 'NATIVE_TESTS', status: 'PASS', fields: { count: '3' }, stream: 'stdout', line: 2, raw: 'NATIVE_TESTS=PASS count=3' }]);
   assert.match(readFileSync(record.stdoutPath, 'utf8'), /100% tests passed/);
   assert.equal(readFileSync(record.stderrPath, 'utf8'), '');
   assert.equal(readFileSync(join(root, 'file.txt'), 'utf8'), 'changed by command\n');
@@ -87,6 +218,7 @@ test('repository command execution resolves a current discovered identity and re
   assert.equal(existsSync(join(project.store, 'runs', project.key, record.id, 'inflight.json')), false);
   assert.equal(readdirSync(join(project.store, 'runs', project.key, record.id)).some((name) => name.endsWith('.tmp')), false);
   assert.match(buildOperationHandoff(project, record), new RegExp(`RAW run:${record.id}`));
+  assert.match(buildOperationHandoff(project, record), /MARKER NATIVE_TESTS=PASS count=3/);
   assert.deepEqual(await operationHistory(project), [{
     runId: record.id, type: 'repository-command', name: 'native-tests', query: null, scope: '.',
     command: 'node tools/run-native-tests.mjs', status: 'pass', durationMs: record.durationMs,

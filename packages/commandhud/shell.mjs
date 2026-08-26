@@ -1,10 +1,9 @@
 import { spawnSync } from 'node:child_process';
-import { readFileSync } from 'node:fs';
 import { basename, relative } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { PassThrough } from 'node:stream';
 import {
-  buildOperationContext, discoverShells, lastRun, listRuns,
+  buildOperationContext, discoverShells, lastRun, listRuns, projectRunEvidence, runById,
   runTerminalCommand, undoOperation, undoPlan,
 } from './core.mjs';
 import { createShellVisualStatus, IDLE_FACE, visualMotionEnabled } from './shell-visual.mjs';
@@ -20,6 +19,31 @@ function clipboard(text) {
 
 function displayCwd(project, cwd) {
   return relative(project.root, cwd).replaceAll('\\', '/') || '.';
+}
+
+export function parseShellEvidenceCommand(command, fallbackRunId) {
+  const match = String(command || '').match(/^\/(raw|head|tail|find|around)(?:\s+(.*))?$/);
+  if (!match) return null;
+  const mode = match[1];
+  const parts = match[2]?.trim().split(/\s+/).filter(Boolean) || [];
+  const runId = /^\d{14}-[0-9a-f]{4}$/i.test(parts[0] || '') ? parts.shift() : fallbackRunId;
+  if (!runId) throw new Error('No command has been recorded yet.');
+  if (mode === 'raw') return { runId, mode };
+  if (mode === 'head' || mode === 'tail') return { runId, mode, count: parts[0] };
+  if (mode === 'find') return { runId, mode, pattern: parts.join(' ') };
+  const context = /^\d+$/.test(parts.at(-1) || '') ? parts.pop() : undefined;
+  return { runId, mode, pattern: parts.join(' '), context };
+}
+
+export function renderShellEvidenceProjection(value) {
+  const lines = [`RUN ${value.runId} · ${value.mode.toUpperCase()}`];
+  for (const stream of value.streams) {
+    lines.push('', `${stream.stream.toUpperCase()}${stream.matchCount === undefined ? '' : ` · ${stream.matchCount} matches`}`);
+    if (value.mode === 'raw') lines.push(stream.content || '(empty)');
+    else lines.push(...(stream.lines.length ? stream.lines.map((line) => `${line.number}: ${line.text}`) : ['(no matching lines)']));
+    if (stream.truncated) lines.push('… additional matching context retained in raw evidence');
+  }
+  return lines.join('\n').trimEnd();
 }
 
 export function renderShellResult(project, record) {
@@ -51,10 +75,15 @@ export function deliverShellResult(project, record, output, clipboardWriter = cl
 
 function help() {
   return [
-    '/copy          copy compact context for the last command again',
-    '/context       print compact context for the last command',
+    '/copy [run]    copy compact context for the latest or selected run',
+    '/context [run] print compact context for the latest or selected run',
     '/raw           print complete stdout and stderr',
-    '/history       list the 10 latest recorded operations',
+    '/head [n]      show the first recorded lines without rerunning',
+    '/tail [n]      show the last recorded lines without rerunning',
+    '/find <text>   find literal text in recorded evidence',
+    '/around <text> [n]  show recorded lines around matches',
+    'Add a run ID after the command to inspect an older run.',
+    '/history [n]   list a bounded number of recorded operations',
     '/undo          inspect the latest command for safe Undo',
     '/undo <run>    apply a previously inspected safe Undo',
     '/shell <id>    switch to powershell, bash, or cmd',
@@ -71,6 +100,27 @@ export async function startHudShell(project, {
   visual = true,
   tui = false,
 } = {}) {
+  let restoreOutputTrace = () => {};
+  if (process.env.COMMANDHUD_TRACE_WRITES === '1') {
+    const tracePath = `${process.env.TEMP || process.env.TMP || process.cwd()}\\commandhud-write-trace.jsonl`;
+    const { appendFileSync, writeFileSync } = await import('node:fs');
+    const originalOutputWrite = output.write;
+    let outputWriteSequence = 0;
+    try { writeFileSync(tracePath, '', 'utf8'); } catch {}
+    output.write = function tracedOutputWrite(chunk, ...args) {
+      const text = Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk);
+      const caller = new Error().stack?.split('\n').slice(2, 6).map((line) => line.trim()).join(' <- ') || '';
+      try {
+        appendFileSync(tracePath, `${JSON.stringify({
+          sequence: ++outputWriteSequence, rows: Number(output.rows) || null,
+          columns: Number(output.columns) || null, text, caller,
+        })}\n`, 'utf8');
+      } catch {}
+      return originalOutputWrite.call(this, chunk, ...args);
+    };
+    restoreOutputTrace = () => { output.write = originalOutputWrite; };
+  }
+
   const available = await discoverShells(project.root);
   let shell = available.find((entry) => entry.id === requestedShell && entry.available);
   if (!shell) throw new Error(`Terminal shell is unavailable: ${requestedShell}`);
@@ -149,26 +199,33 @@ export async function startHudShell(project, {
         continue;
       }
       const previous = lastRun(project);
-      if (command === '/copy' || command === '/context') {
-        if (!previous?.operation) show('No structured command has been recorded yet.\n\n');
+      if (/^\/(?:copy|context)(?:\s|$)/.test(command)) {
+        const [action, requested] = command.split(/\s+/, 2);
+        const selected = requested ? runById(project, requested) : previous;
+        if (!selected?.operation) show(`${requested ? `No structured run found for ${requested}.` : 'No structured command has been recorded yet.'}\n\n`);
         else {
-          const value = buildOperationContext(project, previous).handoff;
-          if (command === '/copy') { clipboardWriter(value); show(`COPIED run:${previous.id}\n\n${value}`); }
+          const value = buildOperationContext(project, selected).handoff;
+          if (action === '/copy') {
+            try { clipboardWriter(value); show(`COPIED run:${selected.id}\n\n${value}`); }
+            catch (error) { show(`NOT COPIED · ${error.message}\nContext remains available with /context ${selected.id}.\n\n`); }
+          }
           else show(`${value}\n\n`);
         }
         continue;
       }
-      if (command === '/raw') {
-        if (!previous) show('No command has been recorded yet.\n\n');
-        else {
-          const stdout = previous.stdoutPath ? readFileSync(previous.stdoutPath, 'utf8') : '';
-          const stderr = previous.stderrPath ? readFileSync(previous.stderrPath, 'utf8') : '';
-          show(`${stdout}${stdout && stderr ? '\n' : ''}${stderr}\n`);
-        }
+      if (/^\/(?:raw|head|tail|find|around)(?:\s|$)/.test(command)) {
+        try {
+          const request = parseShellEvidenceCommand(command, previous?.id);
+          const value = projectRunEvidence(project, request.runId, request);
+          show(`${renderShellEvidenceProjection(value)}\n\n`);
+        } catch (error) { show(`${error.message}\n\n`); }
         continue;
       }
-      if (command === '/history') {
-        show(`${listRuns(project, 10).map((run) => `${run.id} ${run.status.toUpperCase()} ${run.operation?.displayCommand || run.command}`).join('\n')}\n\n`);
+      if (/^\/history(?:\s|$)/.test(command)) {
+        const requested = command.split(/\s+/, 2)[1];
+        const count = requested === undefined ? 10 : Number(requested);
+        if (!Number.isInteger(count) || count < 1 || count > 100) show('/history requires a count from 1 to 100.\n\n');
+        else show(`${listRuns(project, count).map((run) => `${run.id} ${run.status.toUpperCase()} ${run.operation?.displayCommand || run.command}`).join('\n') || '(no recorded runs)'}\n\n`);
         continue;
       }
       if (command.startsWith('/undo')) {
@@ -216,5 +273,6 @@ export async function startHudShell(project, {
     if (filteredInput !== input) filteredInput.end();
     terminal.close();
     layout.finish();
+    restoreOutputTrace();
   }
 }

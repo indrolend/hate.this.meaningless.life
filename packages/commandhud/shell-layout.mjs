@@ -30,8 +30,8 @@ export function splitMouseInput(value) {
 
 function terminalSize(output) {
   return {
-    columns: Math.max(40, Number(output.columns) || 80),
-    rows: Math.max(16, Number(output.rows) || 24),
+    columns: Math.max(1, Number(output.columns) || 80),
+    rows: Math.max(1, Number(output.rows) || 24),
   };
 }
 
@@ -66,12 +66,9 @@ export function createShellLayout(output, { enabled = true } = {}) {
     writeAt(1, clip('(._.)  hate.this.meaningless.life  ·  context condenser', columns));
     writeAt(2, 'IDLE');
     writeAt(3, rule);
-    writeAt(4, '> ');
-    writeAt(5, rule);
-    writeAt(rows - 3, rule);
+    writeAt(rows - 2, rule);
+    writeAt(rows - 1, '> ');
     renderFooter(false);
-    writeAt(rows - 1, '');
-    writeAt(rows, '');
     renderOutput(lastPanel);
   }
 
@@ -84,35 +81,36 @@ export function createShellLayout(output, { enabled = true } = {}) {
       value += `${label} `;
     }
     const rendered = clip(value.trimEnd(), columns);
-    output.write(`${preserveCursor ? '\x1b7' : ''}${CSI}${rows - 2};1H${CSI}2K${rendered}${preserveCursor ? '\x1b8' : ''}`);
+    output.write(`${preserveCursor ? '\x1b7' : ''}${CSI}${rows};1H${CSI}2K${rendered}${preserveCursor ? '\x1b8' : ''}`);
   }
 
   function renderOutput(text) {
     lastPanel = String(text);
     if (!active) return;
     const { columns, rows } = terminalSize(output);
-    const top = 6;
-    const height = Math.max(1, rows - 9);
+    const top = 4;
+    const height = Math.max(0, rows - 7);
     const lines = fitPanelLines(lastPanel, columns, height);
     for (let index = 0; index < height; index++) writeAt(top + index, lines[index] || '');
   }
 
   function placePrompt(prompt) {
     if (!active) return;
-    output.write(`${CSI}4;1H${CSI}2K${prompt}`);
+    output.write(`${CSI}${terminalSize(output).rows - 1};1H${CSI}2K${prompt}`);
   }
 
   function clearPrompt() {
     if (!active) return;
-    output.write(`${CSI}4;1H${CSI}2K> `);
+    output.write(`${CSI}${terminalSize(output).rows - 1};1H${CSI}2K> `);
   }
 
   function start() {
     if (!enabled) return;
     active = true;
+    output.on?.('resize', frame);
     output.write(`${CSI}?1049h${CSI}?1003h${CSI}?1006h${CSI}?25h${CSI}2J`);
     frame();
-    output.on?.('resize', frame);
+    setImmediate(frame);
   }
 
   function updateShell() { frame(); }
@@ -125,7 +123,7 @@ export function createShellLayout(output, { enabled = true } = {}) {
   }
 
   function actionAt(column, row) {
-    if (!active || row !== terminalSize(output).rows - 2) return null;
+    if (!active || row !== terminalSize(output).rows) return null;
     return footerActionAt(column);
   }
 

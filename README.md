@@ -93,6 +93,7 @@ Projects may expose additional typed commands without changing CommandHUD:
         "command": "python tools/verify_assets.py",
         "argv": ["python", "tools/verify_assets.py"],
         "owner": "tools/verify_assets.py",
+        "resultMarkers": true,
         "successMarkers": [
           {"contains": "ASSETS=PASS", "summary": "assets verified"}
         ]
@@ -102,7 +103,7 @@ Projects may expose additional typed commands without changing CommandHUD:
 }
 ```
 
-The browser requests the stable `name`; the runtime rereads the repository declaration, validates its owner path, and executes the recorded `argv`. It does not accept browser-supplied shell text. Optional `kind` values (`test`, `audit`, or `smoke`) select a generic reducer. Literal success markers add project-owned factual summaries only after exit 0.
+The browser requests the stable `name`; the runtime rereads the repository declaration, validates its owner path, and executes the recorded `argv`. It does not accept browser-supplied shell text. Optional `kind` values (`test`, `audit`, or `smoke`) select a generic reducer. Literal success markers add project-owned factual summaries only after exit 0. `resultMarkers: true` records strict `NAME=PASS|FAIL key=value` lines with their stream and line number; these facts never override the real process exit status.
 
 CommandHUD refuses execution outside a Git repository unless an explicit `--root` selects one.
 

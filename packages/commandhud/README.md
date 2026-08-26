@@ -52,10 +52,24 @@ hud continue
 hud run --objective "Verify native gameplay" npm test
 hud packet --copy
 hud history
+hud raw <run-id>
+hud head <run-id> [lines]
+hud tail <run-id> [lines]
+hud find <run-id> <literal-pattern>
+hud around <run-id> <literal-pattern> [context-lines]
+hud copy <run-id>
+hud file-identity <path>
+hud compare-files <source-path> <runtime-path>
+hud service <windows-service-name>
+hud service-reset-plan <windows-service-name>
 hud last --json
 hud tools
 hud update
 ```
+
+On Windows, `hud service <name>` performs a validated read-only service probe and records status, start type, process identity, dependencies, dependents, raw JSON, and Git currency as one immutable operation. The runtime owns the encoded PowerShell transport; the caller supplies only a restricted service name, never executable text.
+
+`hud service-reset-plan <name>` recursively observes dependent services and records a deterministic dependent-first stop order and reverse start order. It excludes previously stopped dependents from both actions and reports running services that cannot stop as blockers. This operation is planning only and never changes service state.
 
 ## Terminal-only HUD
 
@@ -74,13 +88,15 @@ hud shell --tui
 "CommandHUD Shell.cmd" --tui
 ```
 
-The terminal keeps repository-contained cwd changes between commands. `/copy`, `/context`, `/raw`, `/history`, `/undo`, `/shell`, `/cwd`, and `/exit` expose the recorded context and controls without requiring repeated `hud run` wrappers. Undo remains preview-first. Automatic clipboard failure is reported without changing the real command result, and `/copy` retries the last context explicitly.
+The terminal keeps repository-contained cwd changes between commands. `/copy`, `/context`, `/raw`, `/head`, `/tail`, `/find`, `/around`, `/history`, `/undo`, `/shell`, `/cwd`, and `/exit` expose the recorded context and controls without requiring repeated `hud run` wrappers. Evidence, context, and copy commands default to the latest run and accept an explicit run ID for older evidence; they never rerun the original command. `/history [n]` lists 1–100 records without turning the active window into scrollback. Undo remains preview-first. Clipboard failure is reported without changing the real command result or terminating the shell.
 
 Interactive sessions reuse the face-state grammar from the original CommandHUD prototype: `(._.)` idle, an eye cycle while running, `(^_^)` pass, `(x_x)` fail, and `(-_-)` stopped. Only the factual status row is replaced in place; the command and evidence remain ordinary terminal text. `--no-animation`, `COMMANDHUD_REDUCED_MOTION=1`, `REDUCE_MOTION=1`, `TERM=dumb`, and noninteractive output disable motion. `NO_COLOR` remains compatible because this first visual slice does not depend on color.
 
 The default interface is deliberately line-oriented: a simple `> ` prompt, real command execution, condensed output, automatic copy, and slash-command access to evidence and Undo. It does not use the alternate screen, terminal mouse reporting, or cursor-positioned panels.
 
 `--tui` opts into the experimental fixed visual client. That client keeps the face/status header, `> ` input field, bounded output panel, and mouse controls in stable regions. Its footer maps clicks to the same slash commands available from the keyboard. Mouse reporting is disabled before leaving the alternate screen. The TUI must never become runtime authority or weaken the plain shell path.
+
+Terminal write tracing is disabled normally. Set `COMMANDHUD_TRACE_WRITES=1` only while diagnosing fixed-layout rendering; the temporary trace wrapper is removed when the shell exits.
 
 `hud run` streams the command while writing separate raw stdout and stderr logs. Use `--quiet` when only the final reduced packet is wanted. A nonzero underlying command remains nonzero: `PASS` exits 0, `FAIL` exits 1, `BLOCKED` exits 2, and HUD transport/tooling `ERROR` exits 3.
 
@@ -243,7 +259,7 @@ History can display raw stdout and stderr through `GET /history/:runId/evidence/
 
 The main HUD menu mechanically groups package scripts by their colon-separated namespace, including HUD, Android, Native, LG, and maintenance-related groups. Unnamespaced scripts and factual repository adapters remain in General and Tools. Typing searches across every section. Undo, immutable History, Refresh, and compact handoff also live in this same menu instead of occupying separate header menus or buttons. These groups are derived from `currentState().commands`; they do not introduce a second command catalog.
 
-Package scripts are discovered automatically. A project can add typed commands through `commandHud.commands` in its selected project manifest. Each declaration supplies a stable name, inspectable display command, exact argument vector, and optional repository-relative owner path. Optional `kind` values select generic test/audit/smoke reduction; literal `successMarkers` add a bounded summary only on exit 0. Missing owners are omitted; malformed, duplicate, or escaping declarations fail closed.
+Package scripts are discovered automatically. A project can add typed commands through `commandHud.commands` in its selected project manifest. Each declaration supplies a stable name, inspectable display command, exact argument vector, and optional repository-relative owner path. Optional `kind` values select generic test/audit/smoke reduction; literal `successMarkers` add a bounded summary only on exit 0. An adapter may explicitly enable `resultMarkers` to retain strict `NAME=PASS|FAIL key=value` lines with stream/line provenance; marker text never overrides the process exit status. Missing owners are omitted; malformed, duplicate, or escaping declarations fail closed.
 
 ## Live command lifecycle and cancellation
 

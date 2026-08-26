@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { closeSync, createWriteStream, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, createWriteStream, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, platform, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
 import { promisify } from 'node:util';
@@ -277,6 +277,205 @@ export function classifyEvidence(recordCurrency, currentCurrency) {
   return recordCurrency.worktreeFingerprint === currentCurrency.worktreeFingerprint ? 'CURRENT' : 'STALE';
 }
 
+function fileSha256(path) {
+  const hash = createHash('sha256');
+  const descriptor = openSync(path, 'r');
+  const buffer = Buffer.allocUnsafe(1024 * 1024);
+  try {
+    let bytesRead;
+    while ((bytesRead = readSync(descriptor, buffer, 0, buffer.length, null)) > 0) hash.update(buffer.subarray(0, bytesRead));
+  } finally {
+    closeSync(descriptor);
+  }
+  return `sha256:${hash.digest('hex')}`;
+}
+
+export function filesystemIdentity(path, { base = process.cwd() } = {}) {
+  if (typeof path !== 'string' || !path.trim() || /[\0\r\n]/.test(path)) throw new Error('Filesystem identity requires a valid path.');
+  const absolute = resolve(base, path);
+  let metadata;
+  try { metadata = statSync(absolute); }
+  catch (error) {
+    if (error.code === 'ENOENT' || error.code === 'ENOTDIR') return { path: absolute, exists: false, type: 'missing', size: null, mtime: null, sha256: null };
+    throw error;
+  }
+  const type = metadata.isFile() ? 'file' : metadata.isDirectory() ? 'directory' : 'other';
+  return {
+    path: absolute,
+    exists: true,
+    type,
+    size: metadata.size,
+    mtime: metadata.mtime.toISOString(),
+    sha256: type === 'file' ? fileSha256(absolute) : null,
+  };
+}
+
+export function compareFilesystemFiles(leftPath, rightPath, { base = process.cwd() } = {}) {
+  const left = filesystemIdentity(leftPath, { base });
+  const right = filesystemIdentity(rightPath, { base });
+  let status;
+  if (!left.exists && !right.exists) status = 'both-missing';
+  else if (!left.exists) status = 'left-missing';
+  else if (!right.exists) status = 'right-missing';
+  else if (left.type !== 'file' || right.type !== 'file') status = 'not-files';
+  else status = left.sha256 === right.sha256 ? 'identical' : 'different';
+  return {
+    status,
+    sameBytes: status === 'identical' ? true : status === 'different' ? false : null,
+    left,
+    right,
+  };
+}
+
+export function parseWindowsServiceObservation(stdout) {
+  let value;
+  try { value = JSON.parse(String(stdout || '').trim()); }
+  catch { throw new Error('Windows service probe did not return valid JSON evidence.'); }
+  const validText = (item) => typeof item === 'string' && item.length > 0 && !/[\0\r\n]/.test(item);
+  if (!value || typeof value !== 'object' || Array.isArray(value) || !validText(value.name) || !validText(value.status) ||
+      !Array.isArray(value.dependsOn) || !Array.isArray(value.dependents) ||
+      value.dependsOn.some((item) => !validText(item)) || value.dependents.some((item) => !validText(item)) ||
+      !Number.isInteger(value.processId) || value.processId < 0 || typeof value.canStop !== 'boolean') {
+    throw new Error('Windows service probe returned malformed evidence.');
+  }
+  return {
+    name: value.name,
+    displayName: validText(value.displayName) ? value.displayName : value.name,
+    status: value.status,
+    startType: validText(value.startType) ? value.startType : 'Unknown',
+    canStop: value.canStop,
+    processId: value.processId,
+    dependsOn: [...new Set(value.dependsOn)].sort((a, b) => a.localeCompare(b, 'en')),
+    dependents: [...new Set(value.dependents)].sort((a, b) => a.localeCompare(b, 'en')),
+  };
+}
+
+export function buildWindowsServiceResetPlan(observations, targetName) {
+  if (!Array.isArray(observations) || !observations.length) throw new Error('Windows service reset plan requires observed services.');
+  const byName = new Map(observations.map((item) => {
+    const parsed = parseWindowsServiceObservation(JSON.stringify(item));
+    return [parsed.name.toLowerCase(), parsed];
+  }));
+  const target = byName.get(String(targetName || '').toLowerCase());
+  if (!target) throw new Error(`Windows service reset plan is missing target ${targetName}.`);
+  const visited = new Set();
+  const active = new Set();
+  const missing = new Set();
+  const stop = [];
+  const visit = (service) => {
+    const key = service.name.toLowerCase();
+    if (active.has(key)) throw new Error(`Windows service dependency cycle includes ${service.name}.`);
+    if (visited.has(key)) return;
+    active.add(key);
+    for (const name of service.dependents) {
+      const dependent = byName.get(name.toLowerCase());
+      if (dependent) visit(dependent);
+      else missing.add(name);
+    }
+    active.delete(key);
+    visited.add(key);
+    if (service.status.toLowerCase() === 'running') stop.push(service.name);
+  };
+  visit(target);
+  const blockers = [...visited].flatMap((key) => {
+    const item = byName.get(key);
+    const status = item.status.toLowerCase();
+    return (status === 'running' && !item.canStop) || (status !== 'running' && status !== 'stopped') ? [item.name] : [];
+  });
+  const start = [...stop].reverse();
+  if (!start.some((name) => name.toLowerCase() === target.name.toLowerCase())) start.unshift(target.name);
+  return {
+    target: target.name,
+    safe: blockers.length === 0 && missing.size === 0,
+    blockers,
+    missing: [...missing].sort((a, b) => a.localeCompare(b, 'en')),
+    stop,
+    start,
+    observed: [...byName.values()].sort((a, b) => a.name.localeCompare(b.name, 'en')),
+  };
+}
+
+function windowsServiceName(name, command) {
+  const service = String(name || '');
+  if (!/^[A-Za-z0-9_.-]{1,128}$/.test(service)) throw new Error(`hud ${command} requires a valid Windows service name.`);
+  if (process.platform !== 'win32') throw new Error('Windows service observation is available only on Windows.');
+  return service;
+}
+
+async function windowsPowerShell(root) {
+  return (await exec('pwsh.exe', ['-NoProfile', '-NonInteractive', '-Command', '$PSVersionTable.PSVersion.ToString()'], root)).ok
+    ? 'pwsh.exe' : 'powershell.exe';
+}
+
+export async function observeWindowsService(project, name, { stream = false } = {}) {
+  const service = windowsServiceName(name, 'service');
+  const shell = await windowsPowerShell(project.root);
+  const script = [
+    "$ErrorActionPreference='Stop';",
+    `$service=Get-Service -Name '${service}';`,
+    `$cim=Get-CimInstance Win32_Service -Filter \"Name='${service}'\";`,
+    '[pscustomobject]@{',
+    'name=$service.Name;displayName=$service.DisplayName;status=[string]$service.Status;startType=[string]$service.StartType;',
+    'canStop=[bool]$service.CanStop;processId=[int]$cim.ProcessId;',
+    'dependsOn=@($service.ServicesDependedOn|ForEach-Object Name);dependents=@($service.DependentServices|ForEach-Object Name)',
+    '}|ConvertTo-Json -Compress',
+  ].join('');
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  return runCommand(project, [shell, '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+    request: `observe Windows service ${service}`,
+    objective: `Record factual Windows service state for ${service}`,
+    stream,
+    shell: false,
+    operationIdentity: { type: 'windows-service-observation', name: service },
+    operationReducer: ({ stdout, command, record }) => ({
+      type: 'windows-service-observation', name: service, command,
+      displayCommand: `Get-Service -Name ${service}; Get-CimInstance Win32_Service`,
+      status: record.status, exitCode: record.exitCode, durationMs: record.durationMs,
+      observation: record.exitCode === 0 ? parseWindowsServiceObservation(stdout) : null,
+    }),
+  });
+}
+
+export async function planWindowsServiceReset(project, name, { stream = false } = {}) {
+  const service = windowsServiceName(name, 'service-reset-plan');
+  const shell = await windowsPowerShell(project.root);
+  const script = [
+    "$ErrorActionPreference='Stop';",
+    '$items=[System.Collections.Generic.List[object]]::new();$seen=@{};',
+    'function Add-ServiceTree($service){',
+    'if($seen.ContainsKey($service.Name)){return};$seen[$service.Name]=$true;',
+    `$cim=Get-CimInstance Win32_Service -Filter \"Name='$($service.Name)'\";`,
+    '$items.Add([pscustomobject]@{name=$service.Name;displayName=$service.DisplayName;status=[string]$service.Status;',
+    'startType=[string]$service.StartType;canStop=[bool]$service.CanStop;processId=[int]$cim.ProcessId;',
+    'dependsOn=@($service.ServicesDependedOn|ForEach-Object Name);dependents=@($service.DependentServices|ForEach-Object Name)});',
+    'foreach($dependent in $service.DependentServices){Add-ServiceTree $dependent}};',
+    `Add-ServiceTree (Get-Service -Name '${service}');`,
+    'ConvertTo-Json -InputObject @($items) -Compress -Depth 4',
+  ].join('');
+  const encoded = Buffer.from(script, 'utf16le').toString('base64');
+  return runCommand(project, [shell, '-NoProfile', '-NonInteractive', '-EncodedCommand', encoded], {
+    request: `plan Windows service reset ${service}`,
+    objective: `Observe dependencies and plan a safe reset for ${service}`,
+    stream,
+    shell: false,
+    operationIdentity: { type: 'windows-service-reset-plan', name: service },
+    operationReducer: ({ stdout, command, record }) => {
+      let plan = null;
+      if (record.exitCode === 0) {
+        let observations;
+        try { observations = JSON.parse(String(stdout || '').trim()); }
+        catch { throw new Error('Windows service reset probe did not return valid JSON evidence.'); }
+        plan = buildWindowsServiceResetPlan(observations, service);
+      }
+      return {
+        type: 'windows-service-reset-plan', name: service, command,
+        displayCommand: `Get-Service -Name ${service}; recursively inspect dependent services`,
+        status: record.status, exitCode: record.exitCode, durationMs: record.durationMs, plan,
+      };
+    },
+  });
+}
+
 export function setWorkingValue(project, field, value, currency) {
   if (!['objective', 'frontier'].includes(field)) throw new Error(`Unsupported working state field: ${field}`);
   const state = readProjectState(project);
@@ -337,6 +536,7 @@ function repositoryCommandDefinitions(root) {
     const argv = entry?.argv;
     const owner = typeof entry?.owner === 'string' ? entry.owner.replaceAll('\\', '/') : null;
     const successMarkers = entry?.successMarkers || [];
+    const resultMarkers = entry?.resultMarkers ?? false;
     const kind = entry?.kind || null;
     if (!/^[a-z0-9][a-z0-9:._-]*$/i.test(name) || !command || !Array.isArray(argv) || !argv.length || argv.some((value) => typeof value !== 'string' || !value)) {
       throw new Error(`Invalid CommandHUD command declaration: ${name || '(unnamed)'}`);
@@ -346,6 +546,7 @@ function repositoryCommandDefinitions(root) {
       typeof marker?.summary !== 'string' || !marker.summary || marker.summary.length > 120)) {
       throw new Error(`Invalid CommandHUD success marker declaration: ${name}`);
     }
+    if (typeof resultMarkers !== 'boolean') throw new Error(`Invalid CommandHUD result marker declaration: ${name}`);
     if (kind !== null && !['test', 'audit', 'smoke'].includes(kind)) throw new Error(`Invalid CommandHUD command kind: ${name}`);
     if (owner) {
       const ownerPath = resolve(root, owner);
@@ -356,7 +557,7 @@ function repositoryCommandDefinitions(root) {
       if (!existsSync(ownerPath)) continue;
     }
     if (commands.some((item) => item.name === name)) throw new Error(`Duplicate repository command identity: ${name}`);
-    commands.push({ name, command, argv: [...argv], kind, successMarkers: successMarkers.map((marker) => ({ contains: marker.contains, summary: marker.summary })) });
+    commands.push({ name, command, argv: [...argv], kind, resultMarkers, successMarkers: successMarkers.map((marker) => ({ contains: marker.contains, summary: marker.summary })) });
   }
   return commands;
 }
@@ -386,6 +587,27 @@ function firstMatch(text, patterns) {
     if (match) return match[0].trim();
   }
   return null;
+}
+
+export function parseResultMarkers(stdout, stderr = '') {
+  const markers = [];
+  for (const [stream, content] of [['stdout', stdout], ['stderr', stderr]]) {
+    const lines = String(content || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+    for (const [index, rawLine] of lines.entries()) {
+      const line = rawLine.trim();
+      const match = line.match(/^([A-Z][A-Z0-9_]{1,63})=(PASS|FAIL)(?:\s+(.*))?$/);
+      if (!match) continue;
+      const fields = {};
+      let valid = true;
+      for (const token of match[3]?.split(/\s+/).filter(Boolean) || []) {
+        const field = token.match(/^([A-Za-z][A-Za-z0-9_.-]{0,63})=([^\s=]+)$/);
+        if (!field || Object.hasOwn(fields, field[1])) { valid = false; break; }
+        fields[field[1]] = field[2];
+      }
+      if (valid) markers.push({ event: match[1], status: match[2], fields, stream, line: index + 1, raw: line });
+    }
+  }
+  return markers;
 }
 
 function decodePowerShellCliXml(value) {
@@ -444,7 +666,7 @@ function normalizeTerminalText(value, root = '') {
   return output.join('\n').trim();
 }
 
-export function reduceOutput(command, stdout, stderr, exitCode, { root = '', kind = null, successMarkers = [] } = {}) {
+export function reduceOutput(command, stdout, stderr, exitCode, { root = '', kind = null, successMarkers = [], resultMarkers = false } = {}) {
   const text = normalizeTerminalText(`${stdout}\n${stderr}`, root);
   const summary = [];
   const commandText = String(command || '');
@@ -475,7 +697,8 @@ export function reduceOutput(command, stdout, stderr, exitCode, { root = '', kin
       : /test|assert|expect/i.test(cause || text) ? 'test'
         : /compile|link|cmake|msbuild/i.test(cause || text) ? 'build' : 'command';
   const tail = text.split(/\r?\n/).filter(Boolean).slice(-8);
-  return { reducer: /npm/.test(command) ? 'npm' : /ctest/.test(command) ? 'ctest' : 'generic', summary, cause, classification, tail };
+  const markers = resultMarkers ? parseResultMarkers(stdout, stderr) : [];
+  return { reducer: /npm/.test(command) ? 'npm' : /ctest/.test(command) ? 'ctest' : 'generic', summary, cause, classification, tail, markers };
 }
 
 export function buildPresentation(record) {
@@ -542,7 +765,7 @@ export async function runCommand(project, tokens, {
   objective, stream = true, request = null, workflow = null,
   acceptedExitCodes = [0], operationReducer = null, shell = true, captureDelta = false,
   signal = null, onStart = null, onOutput = null, operationIdentity = null,
-  cwd = project.root, displayCommand = null, reductionKind = null, successMarkers = [],
+  cwd = project.root, displayCommand = null, reductionKind = null, successMarkers = [], resultMarkers = false,
 } = {}) {
   if (!tokens.length) throw new Error('hud run requires a command.');
   const transportCommand = tokens.map((token) => /[\s"']/.test(token) ? JSON.stringify(token) : token).join(' ');
@@ -587,7 +810,7 @@ export async function runCommand(project, tokens, {
       schemaVersion: SCHEMA_VERSION, id, project: project.identity.id, root: project.root,
       request: request || null, command, transportCommand, argv: tokens, cwd, objective: objective || null,
       startedAt: started.toISOString(), pid: child.pid, captureDelta, treeBefore,
-      gitBefore: before, currencyBefore, stdoutPath, stderrPath, operationIdentity,
+      gitBefore: before, currencyBefore, stdoutPath, stderrPath, operationIdentity, resultMarkers,
     }, { exclusive: true });
   } catch (error) {
     await terminate(true);
@@ -623,7 +846,7 @@ export async function runCommand(project, tokens, {
   const [after, currencyAfter, treeAfter] = await Promise.all([
     gitSnapshot(project.root), repositoryCurrency(project.root, project.identity.id), captureDelta ? worktreeTree(project.root) : null,
   ]);
-  const reduction = reduceOutput(command, stdout, stderr, exitCode, { root: project.root, kind: reductionKind, successMarkers });
+  const reduction = reduceOutput(command, stdout, stderr, exitCode, { root: project.root, kind: reductionKind, successMarkers, resultMarkers });
   const missingCommand = exitCode !== 0 && /(?:command not found|is not recognized as (?:a name of |the name of )?a? ?(?:cmdlet|function|script file|executable program)|ENOENT)/i.test(normalizeTerminalText(`${stdout}\n${stderr}`));
   const accepted = acceptedExitCodes.includes(exitCode);
   const record = {
@@ -714,7 +937,7 @@ export async function recoverInterruptedRuns(project) {
     const [after, currencyAfter, treeAfter] = await Promise.all([
       gitSnapshot(project.root), repositoryCurrency(project.root, project.identity.id), inflight.captureDelta ? worktreeTree(project.root) : null,
     ]);
-    const reduction = reduceOutput(inflight.command, stdout, stderr, 1, { root: project.root });
+    const reduction = reduceOutput(inflight.command, stdout, stderr, 1, { root: project.root, resultMarkers: inflight.resultMarkers === true });
     const record = {
       schemaVersion: SCHEMA_VERSION, id, project: project.identity.id, root: project.root,
       branch: inflight.gitBefore.branch, headBefore: inflight.gitBefore.head, headAfter: after.head, upstream: inflight.gitBefore.upstream,
@@ -738,7 +961,7 @@ export async function recoverInterruptedRuns(project) {
     if (inflight.operationIdentity?.type === 'repository-command') {
       record.operation = {
         ...inflight.operationIdentity, command: inflight.command, exitCode: null,
-        status: 'interrupted', durationMs: record.durationMs, summary: [...reduction.summary],
+        status: 'interrupted', durationMs: record.durationMs, summary: [...reduction.summary], markers: [...reduction.markers],
       };
     } else if (inflight.operationIdentity?.type === 'terminal-command') {
       record.operation = {
@@ -829,6 +1052,7 @@ export async function runRepositoryCommand(project, name, { stream = false, sign
     captureDelta: true,
     reductionKind: selected.kind,
     successMarkers: selected.successMarkers,
+    resultMarkers: selected.resultMarkers,
     signal, onStart, onOutput,
     operationIdentity: { type: 'repository-command', name: selected.name, displayCommand: selected.command },
     operationReducer: ({ exitCode, command, record }) => ({
@@ -836,6 +1060,7 @@ export async function runRepositoryCommand(project, name, { stream = false, sign
       displayCommand: selected.command, command, exitCode,
       status: record.status, durationMs: record.durationMs,
       summary: [...record.reduction.summary],
+      markers: [...record.reduction.markers],
     }),
   });
 }
@@ -1010,6 +1235,10 @@ export function buildOperationContext(project, record) {
       ? `RESULT INTERRUPTED completion-not-observed duration=${operation.durationMs}ms`
       : `RESULT ${operation.status.toUpperCase()} exit=${operation.exitCode} duration=${operation.durationMs}ms`);
     if (operation.status !== 'interrupted' && operation.summary.length) lines.push(`SUMMARY ${operation.summary.join('; ')}`);
+    for (const marker of operation.markers || []) {
+      const fields = Object.entries(marker.fields).map(([key, value]) => `${key}=${value}`).join(' ');
+      lines.push(`MARKER ${marker.event}=${marker.status}${fields ? ` ${fields}` : ''}`);
+    }
   } else if (operation.type === 'terminal-command') {
     lines.push(`SHELL ${operation.shellLabel || operation.shell}`);
     lines.push(`COMMAND ${operation.displayCommand || operation.command}`);
@@ -1028,6 +1257,31 @@ export function buildOperationContext(project, record) {
     lines.push(`COMMAND ${operation.command}`);
     lines.push(`RESULT ${operation.status.toUpperCase()} ${operation.fileCount} files duration=${operation.durationMs}ms`);
     lines.push('', 'FILES', ...operation.paths);
+  } else if (operation.type === 'windows-service-observation') {
+    lines.push(`SERVICE ${operation.name}`);
+    lines.push(`COMMAND ${operation.displayCommand}`);
+    lines.push('TRANSPORT runtime-owned encoded PowerShell; exact argv retained in run record');
+    lines.push(`RESULT ${operation.status.toUpperCase()} exit=${operation.exitCode} duration=${operation.durationMs}ms`);
+    if (operation.observation) {
+      lines.push(`STATE ${operation.observation.status}`);
+      lines.push(`START_TYPE ${operation.observation.startType}`);
+      lines.push(`PROCESS_ID ${operation.observation.processId}`);
+      lines.push(`CAN_STOP ${operation.observation.canStop}`);
+      lines.push(`DEPENDS_ON ${operation.observation.dependsOn.join(',') || 'none'}`);
+      lines.push(`DEPENDENTS ${operation.observation.dependents.join(',') || 'none'}`);
+    }
+  } else if (operation.type === 'windows-service-reset-plan') {
+    lines.push(`SERVICE ${operation.name}`);
+    lines.push(`COMMAND ${operation.displayCommand}`);
+    lines.push('ACTION PLAN_ONLY no service state changed');
+    lines.push(`RESULT ${operation.status.toUpperCase()} exit=${operation.exitCode} duration=${operation.durationMs}ms`);
+    if (operation.plan) {
+      lines.push(`SAFE ${operation.plan.safe}`);
+      lines.push(`BLOCKERS ${operation.plan.blockers.join(',') || 'none'}`);
+      lines.push(`MISSING ${operation.plan.missing.join(',') || 'none'}`);
+      lines.push(`STOP_ORDER ${operation.plan.stop.join(' -> ') || 'none'}`);
+      lines.push(`START_ORDER ${operation.plan.start.join(' -> ') || 'none'}`);
+    }
   } else {
     lines.push(`COMMAND ${operation.command || record.command}`);
     lines.push(`RESULT ${record.status.toUpperCase()} exit=${record.exitCode} duration=${record.durationMs}ms`);
@@ -1237,6 +1491,83 @@ export function runById(project, id) {
   const value = String(id || '');
   if (!/^\d{14}-[0-9a-f]{4}$/i.test(value)) return null;
   return readJson(join(project.store, 'runs', project.key, value, 'run.json')) || null;
+}
+
+function evidenceLines(content) {
+  const lines = String(content).replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
+  if (lines.at(-1) === '') lines.pop();
+  return lines;
+}
+
+function boundedEvidenceNumber(value, fallback, name) {
+  const number = value === undefined ? fallback : Number(value);
+  if (!Number.isInteger(number) || number < 1 || number > 500) {
+    throw new Error(`hud ${name} requires a line count from 1 to 500.`);
+  }
+  return number;
+}
+
+export function projectRunEvidence(project, id, { mode = 'raw', count, pattern, context } = {}) {
+  const record = runById(project, id);
+  if (!record) throw new Error(`No recorded run found for ${id}.`);
+  const runDirectory = join(project.store, 'runs', project.key, record.id);
+  const expected = {
+    stdout: join(runDirectory, 'stdout.log'),
+    stderr: join(runDirectory, 'stderr.log'),
+  };
+  for (const stream of ['stdout', 'stderr']) {
+    if (resolve(record[`${stream}Path`] || '') !== resolve(expected[stream])) {
+      throw new Error(`Recorded ${stream} evidence path is invalid for ${record.id}.`);
+    }
+    if (!existsSync(expected[stream])) throw new Error(`Recorded ${stream} evidence is missing for ${record.id}.`);
+  }
+  if (!['raw', 'head', 'tail', 'find', 'around'].includes(mode)) throw new Error(`Unknown evidence projection: ${mode}.`);
+  const needle = pattern === undefined ? null : String(pattern);
+  if ((mode === 'find' || mode === 'around') && !needle) throw new Error(`hud ${mode} requires a non-empty pattern.`);
+  const lineCount = mode === 'head' || mode === 'tail' ? boundedEvidenceNumber(count, 20, mode) : null;
+  const contextCount = mode === 'around' ? boundedEvidenceNumber(context, 2, mode) : null;
+
+  const streams = ['stdout', 'stderr'].map((stream) => {
+    const content = readFileSync(expected[stream], 'utf8');
+    const all = evidenceLines(content);
+    if (mode === 'raw') return { stream, totalLines: all.length, content };
+    let indexes;
+    if (mode === 'head') indexes = all.slice(0, lineCount).map((_, index) => index);
+    else if (mode === 'tail') indexes = all.slice(Math.max(0, all.length - lineCount)).map((_, index) => Math.max(0, all.length - lineCount) + index);
+    else {
+      const matches = all.flatMap((line, index) => line.includes(needle) ? [index] : []);
+      if (mode === 'find') indexes = matches;
+      else {
+        const selected = new Set();
+        for (const index of matches) {
+          const first = Math.max(0, index - contextCount);
+          const last = Math.min(all.length - 1, index + contextCount);
+          for (let selectedIndex = first; selectedIndex <= last; selectedIndex++) selected.add(selectedIndex);
+        }
+        indexes = [...selected].sort((a, b) => a - b);
+      }
+      const boundedIndexes = indexes.slice(0, 500);
+      return {
+        stream,
+        totalLines: all.length,
+        matchCount: matches.length,
+        truncated: boundedIndexes.length < indexes.length,
+        lines: boundedIndexes.map((index) => ({ number: index + 1, text: all[index] })),
+      };
+    }
+    return { stream, totalLines: all.length, lines: indexes.map((index) => ({ number: index + 1, text: all[index] })) };
+  });
+  return {
+    runId: record.id,
+    command: record.command,
+    status: record.status,
+    exitCode: record.exitCode,
+    mode,
+    pattern: needle,
+    count: lineCount,
+    context: contextCount,
+    streams,
+  };
 }
 
 export async function operationHistory(project, limit = 25) {

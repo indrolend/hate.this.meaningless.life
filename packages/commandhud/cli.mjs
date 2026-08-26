@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildOperationContext, lastRun, listRuns, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildOperationContext, compareFilesystemFiles, filesystemIdentity, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 function parse(argv) {
   const args = [...argv];
@@ -45,6 +45,18 @@ function copy(text) {
     : process.platform === 'darwin' ? ['pbcopy', []] : ['sh', ['-c', 'command -v wl-copy >/dev/null && wl-copy || xclip -selection clipboard']];
   const result = spawnSync(tool[0], tool[1], { input: text, encoding: 'utf8', windowsHide: true });
   if (result.status !== 0) throw new Error('Clipboard tool is unavailable. Packet was still printed.');
+}
+
+function printEvidenceProjection(value) {
+  console.log(`RUN ${value.runId}`);
+  console.log(`STATUS ${value.status.toUpperCase()} exit=${value.exitCode}`);
+  console.log(`COMMAND ${value.command}`);
+  for (const stream of value.streams) {
+    console.log(`\n${stream.stream.toUpperCase()}${stream.matchCount === undefined ? '' : ` matches=${stream.matchCount}`}`);
+    if (value.mode === 'raw') process.stdout.write(stream.content.endsWith('\n') || !stream.content ? stream.content : `${stream.content}\n`);
+    else for (const line of stream.lines) console.log(`${line.number}: ${line.text}`);
+    if (stream.truncated) console.log(`[bounded: additional matching context retained in raw evidence]`);
+  }
 }
 
 async function context(project, json) {
@@ -121,6 +133,52 @@ async function main() {
     for (const directory of value.root.directories) {
       console.log(`${directory.path} ${directory.directories.length}d ${directory.files.length}f`);
     }
+    return;
+  }
+  if (command === 'file-identity') {
+    if (!args[0]) throw new Error('hud file-identity requires a filesystem path.');
+    const value = filesystemIdentity(args[0], { base: project.root });
+    if (options.json) return console.log(JSON.stringify(value, null, 2));
+    printObject(value);
+    return;
+  }
+  if (command === 'compare-files') {
+    if (!args[0] || !args[1]) throw new Error('hud compare-files requires two filesystem paths.');
+    const value = compareFilesystemFiles(args[0], args[1], { base: project.root });
+    if (options.json) return console.log(JSON.stringify(value, null, 2));
+    printObject({ status: value.status, same_bytes: value.sameBytes });
+    console.log('LEFT'); printObject(value.left);
+    console.log('RIGHT'); printObject(value.right);
+    return;
+  }
+  if (command === 'service') {
+    if (!args[0]) throw new Error('hud service requires a Windows service name.');
+    const record = await observeWindowsService(project, args[0]);
+    if (options.json) return console.log(JSON.stringify({ runId: record.id, status: record.status, operation: record.operation, stdoutPath: record.stdoutPath, stderrPath: record.stderrPath }, null, 2));
+    const value = record.operation;
+    console.log(`SERVICE ${value.name}`);
+    console.log(`STATUS ${value.status.toUpperCase()} exit=${value.exitCode}`);
+    if (value.observation) printObject({
+      state: value.observation.status, display_name: value.observation.displayName,
+      start_type: value.observation.startType, can_stop: value.observation.canStop,
+      process_id: value.observation.processId, depends_on: value.observation.dependsOn,
+      dependents: value.observation.dependents,
+    });
+    console.log(`RAW run:${record.id}`);
+    process.exitCode = record.status === 'pass' ? 0 : record.status === 'blocked' ? 2 : 1;
+    return;
+  }
+  if (command === 'service-reset-plan') {
+    if (!args[0]) throw new Error('hud service-reset-plan requires a Windows service name.');
+    const record = await planWindowsServiceReset(project, args[0]);
+    if (options.json) return console.log(JSON.stringify({ runId: record.id, status: record.status, operation: record.operation, stdoutPath: record.stdoutPath, stderrPath: record.stderrPath }, null, 2));
+    const value = record.operation;
+    console.log(`SERVICE_RESET_PLAN ${value.name}`);
+    console.log(`STATUS ${value.status.toUpperCase()} exit=${value.exitCode}`);
+    if (value.plan) printObject({ safe: value.plan.safe, blockers: value.plan.blockers, missing: value.plan.missing, stop_order: value.plan.stop, start_order: value.plan.start });
+    console.log('ACTION=PLAN_ONLY');
+    console.log(`RAW run:${record.id}`);
+    process.exitCode = record.status === 'pass' ? 0 : record.status === 'blocked' ? 2 : 1;
     return;
   }
   if (command === 'desktop') {
@@ -300,6 +358,27 @@ async function main() {
     for (const run of runs) console.log(`${run.id} ${run.status.toUpperCase()} exit=${run.exitCode} ${run.command}`);
     return;
   }
+  if (['raw', 'head', 'tail', 'find', 'around'].includes(command)) {
+    const runId = args[0];
+    if (!runId) throw new Error(`hud ${command} requires a recorded run ID.`);
+    const projection = projectRunEvidence(project, runId, command === 'find'
+      ? { mode: command, pattern: args.slice(1).join(' ') }
+      : command === 'around'
+        ? { mode: command, pattern: args[1], context: args[2] }
+        : { mode: command, count: args[1] });
+    return options.json ? console.log(JSON.stringify(projection, null, 2)) : printEvidenceProjection(projection);
+  }
+  if (command === 'copy') {
+    const runId = args[0];
+    if (!runId) throw new Error('hud copy requires a recorded run ID.');
+    const record = runById(project, runId);
+    if (!record) throw new Error(`No recorded run found for ${runId}.`);
+    const value = buildOperationContext(project, record);
+    if (options.json) return console.log(JSON.stringify({ runId: record.id, ...value }, null, 2));
+    console.log(value.handoff);
+    copy(value.handoff);
+    return;
+  }
   if (command === 'update') {
     const update = await fetchUpdate(project);
     return options.json ? console.log(JSON.stringify(update, null, 2)) : printObject(update);
@@ -315,7 +394,7 @@ async function main() {
 }
 
 main().catch((error) => {
-  const blocked = /No Git repository|not the verified|No recorded run|Manifest request failed|unusable commit provenance|Clipboard tool is unavailable/i.test(error.message);
+  const blocked = /No Git repository|not the verified|No recorded run|Manifest request failed|unusable commit provenance|Clipboard tool is unavailable|hud service(?:-reset-plan)? requires|Windows service observation is available only/i.test(error.message);
   console.error(`${blocked ? 'CAUSE' : 'ERROR'}=${error.message}`);
   console.error(`STATUS=${blocked ? 'BLOCKED' : 'ERROR'}`);
   process.exitCode = blocked ? 2 : 3;
