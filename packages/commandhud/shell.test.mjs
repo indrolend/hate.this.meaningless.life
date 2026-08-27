@@ -5,6 +5,16 @@ import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { deliverShellResult, parseShellEvidenceCommand, renderShellEvidenceProjection, renderShellResult } from './shell.mjs';
+import { resolveProject } from './core.mjs';
+
+async function shellProject() {
+  const root = mkdtempSync(join(tmpdir(), 'commandhud-shell-project-'));
+  execFileSync('git', ['init', '-b', 'main'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'hud@example.invalid'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'HUD Test'], { cwd: root });
+  execFileSync('git', ['commit', '--allow-empty', '-m', 'fixture'], { cwd: root });
+  return resolveProject({ root, env: { ...process.env, HUD_STATE_ROOT: join(root, '.state') } });
+}
 
 test('terminal evidence commands target the latest or an explicit immutable run', () => {
   const runId = '20260826010101-abcd';
@@ -49,9 +59,9 @@ test('terminal shell renders compact measured context without replacing raw evid
   assert.match(rendered, /\/copy · \/raw · \/undo/);
 });
 
-test('terminal shell displays and copies the same shortened command context', () => {
-  const root = join('C:', 'fixture', 'repo');
-  const project = { root };
+test('terminal shell displays and copies the same shortened command context', async () => {
+  const project = await shellProject();
+  const root = project.root;
   const record = {
     id: '20260825010101-copy', status: 'pass', exitCode: 0, durationMs: 20,
     branch: 'fixture', gitAfter: { branch: 'fixture' }, cwd: root,
@@ -64,16 +74,18 @@ test('terminal shell displays and copies the same shortened command context', ()
   };
   let displayed = '';
   let copied = '';
-  const result = deliverShellResult(project, record, { write: (value) => { displayed += value; } }, (value) => { copied = value; });
+  const result = await deliverShellResult(project, record, { write: (value) => { displayed += value; } }, (value) => { copied = value; });
   assert.equal(result.copied, true);
   assert.equal(copied, result.context);
-  assert.match(displayed, /SHORTENED OUTPUT\nREPO repo/);
+  assert.match(displayed, /SHORTENED OUTPUT\nREPO commandhud-shell-project-/);
+  assert.match(displayed, /EVIDENCE UNKNOWN/);
   assert.match(displayed, /COMMAND echo OK/);
   assert.match(displayed, /COPIED · run:20260825010101-copy/);
 });
 
-test('clipboard failure is visible without discarding shortened output', () => {
-  const root = join('C:', 'fixture', 'repo');
+test('clipboard failure is visible without discarding shortened output', async () => {
+  const project = await shellProject();
+  const root = project.root;
   const record = {
     id: 'copy-failure', status: 'pass', exitCode: 0, durationMs: 1,
     branch: 'fixture', gitAfter: { branch: 'fixture' }, cwd: root,
@@ -81,7 +93,7 @@ test('clipboard failure is visible without discarding shortened output', () => {
     operation: { type: 'terminal-command', shell: 'bash', shellLabel: 'Bash', displayCommand: 'true', status: 'pass', exitCode: 0, durationMs: 1, cwdBefore: root, cwdAfter: root, cwdPersistence: 'unchanged', summary: [] },
   };
   let displayed = '';
-  const result = deliverShellResult({ root }, record, { write: (value) => { displayed += value; } }, () => { throw new Error('clipboard unavailable'); });
+  const result = await deliverShellResult(project, record, { write: (value) => { displayed += value; } }, () => { throw new Error('clipboard unavailable'); });
   assert.equal(result.copied, false);
   assert.match(displayed, /SHORTENED OUTPUT/);
   assert.match(displayed, /NOT COPIED · clipboard unavailable/);

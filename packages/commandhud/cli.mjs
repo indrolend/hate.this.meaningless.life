@@ -1,7 +1,8 @@
 #!/usr/bin/env node
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
-import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildOperationContext, filesystemIdentity, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { fileURLToPath } from 'node:url';
+import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildCurrentOperationContext, filesystemIdentity, inspectRuntimeAuthority, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 const HELP = `hate.this.meaningless.life · context condenser
 
@@ -23,6 +24,7 @@ Retained evidence (never reruns the command):
   hud copy <run>
 
 Safety and authority:
+  hud runtime                       executing/source authority and duplicate check
   hud undo-plan <run>               inspect whether a worktree reversal is safe
   hud undo <run>                    apply an evidence-backed worktree reversal
   hud file-identity <path>
@@ -141,6 +143,26 @@ async function main() {
   const { command, args, options } = parse(process.argv.slice(2));
   if (['help', '--help', '-h'].includes(command)) {
     console.log(HELP);
+    return;
+  }
+  if (command === 'runtime') {
+    let selectedProject = null;
+    try { selectedProject = await resolveProject({ root: options.root }); }
+    catch (error) { if (options.root) throw error; }
+    const value = inspectRuntimeAuthority({
+      executingPath: fileURLToPath(import.meta.url), project: selectedProject,
+    });
+    if (options.json) return console.log(JSON.stringify(value, null, 2));
+    console.log(`COMMANDHUD_RUNTIME ${value.status}`);
+    printObject({ executing: value.executing.path, executing_role: value.executing.role, source: value.source?.cli.path || 'unknown', same_bytes: value.sameBytes ?? 'unknown' });
+    if (value.sourceCandidates.length > 1) {
+      console.log('SOURCE_CANDIDATES');
+      for (const candidate of value.sourceCandidates) console.log(candidate.cli.path);
+    }
+    if (value.projectCopies.length) {
+      console.log('PROJECT_COPIES');
+      for (const copy of value.projectCopies) console.log(copy.identity.path);
+    }
     return;
   }
   const project = await resolveProject({ root: options.root });
@@ -325,7 +347,7 @@ async function main() {
   if (command === 'handoff') {
     const record = lastRun(project);
     if (!record) throw new Error('No recorded run exists for this project.');
-    const context = buildOperationContext(project, record);
+    const context = await buildCurrentOperationContext(project, record);
     if (options.json) return console.log(JSON.stringify({ runId: record.id, ...context }, null, 2));
     const handoff = context.handoff;
     console.log(handoff);
@@ -423,7 +445,7 @@ async function main() {
     if (!runId) throw new Error('hud copy requires a recorded run ID.');
     const record = runById(project, runId);
     if (!record) throw new Error(`No recorded run found for ${runId}.`);
-    const value = buildOperationContext(project, record);
+    const value = await buildCurrentOperationContext(project, record);
     if (options.json) return console.log(JSON.stringify({ runId: record.id, ...value }, null, 2));
     console.log(value.handoff);
     copy(value.handoff);

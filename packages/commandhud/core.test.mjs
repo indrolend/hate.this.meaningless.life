@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, compareFilesystemFiles, continuation, currentState, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, gitSnapshot, operationDetail, operationHistory, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
+import { buildCurrentOperationContext, buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, compareFilesystemFiles, continuation, currentState, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, gitSnapshot, inspectRuntimeAuthority, operationDetail, operationHistory, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -116,6 +116,33 @@ test('filesystem comparison reports missing and non-file inputs without claiming
   assert.equal(directoryComparison.status, 'not-files');
   assert.equal(directoryComparison.sameBytes, null);
   assert.throws(() => filesystemIdentity(''), /valid path/);
+});
+
+test('runtime authority distinguishes current, stale, and project-local duplicate implementations', () => {
+  const root = mkdtempSync(join(tmpdir(), 'hud-runtime-authority-'));
+  const state = join(root, 'state');
+  const source = join(root, 'source');
+  const installed = join(root, 'installed', 'node_modules', '@indrolend', 'hate-this-meaningless-life', 'packages', 'commandhud', 'cli.mjs');
+  mkdirSync(join(source, 'packages', 'commandhud'), { recursive: true });
+  mkdirSync(join(installed, '..'), { recursive: true });
+  mkdirSync(join(state, 'projects'), { recursive: true });
+  writeFileSync(join(source, 'packages', 'commandhud', 'cli.mjs'), 'same');
+  writeFileSync(installed, 'same');
+  writeFileSync(join(state, 'projects', 'product.json'), JSON.stringify({ id: 'indrolend/hate.this.meaningless.life', root: source }));
+  const env = { ...process.env, HUD_STATE_ROOT: state };
+  assert.equal(inspectRuntimeAuthority({ executingPath: installed, env }).status, 'CURRENT');
+  writeFileSync(installed, 'older');
+  assert.equal(inspectRuntimeAuthority({ executingPath: installed, env }).status, 'STALE');
+
+  const projectRoot = join(root, 'project');
+  mkdirSync(join(projectRoot, 'tools', 'hud'), { recursive: true });
+  writeFileSync(join(projectRoot, 'tools', 'hud', 'cli.mjs'), 'copy');
+  const duplicate = inspectRuntimeAuthority({
+    executingPath: installed, env,
+    project: { root: projectRoot, identity: { id: 'example/project' } },
+  });
+  assert.equal(duplicate.status, 'DUPLICATE');
+  assert.equal(duplicate.projectCopies[0].path, 'tools/hud/cli.mjs');
 });
 
 test('filesystem comparison operation preserves exact identities and compact handoff in immutable evidence', async () => {
@@ -865,7 +892,8 @@ test('terminal context export is truthful, bounded, and benchmarked against raw 
     ? "1..120 | ForEach-Object { Write-Output (('line {0} ' -f $_) + ('x' * 100)) }; [Console]::Error.WriteLine('TERMINAL_ERROR_EVIDENCE')"
     : "for i in $(seq 1 120); do printf 'line %s %100s\\n' \"$i\" x; done; printf 'TERMINAL_ERROR_EVIDENCE\\n' >&2";
   const record = await runTerminalCommand(project, command, { shell: shell.id });
-  const context = buildOperationContext(project, record);
+  const context = await buildCurrentOperationContext(project, record);
+  assert.match(context.handoff, /EVIDENCE CURRENT/);
   assert.match(context.handoff, /OPERATION TERMINAL-COMMAND/);
   assert.match(context.handoff, new RegExp(`COMMAND ${command.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`));
   assert.match(context.handoff, /STDOUT_EXCERPT \(tail, bounded\)/);
@@ -887,6 +915,21 @@ test('evidence currency is current, stale, or unknown', () => {
   assert.equal(classifyEvidence({ ...current, worktreeFingerprint: 'sha256:two' }, current), 'STALE');
   assert.equal(classifyEvidence({ ...current, head: 'b' }, current), 'STALE');
   assert.equal(classifyEvidence(null, current), 'UNKNOWN');
+});
+
+test('current handoff context exposes currency without changing historical evidence', async () => {
+  const project = await fixtureProject();
+  const shell = (await discoverShells(project.root)).find((entry) => entry.available && entry.id === (process.platform === 'win32' ? 'powershell' : 'bash'));
+  const record = await runTerminalCommand(project, 'echo evidence', { shell: shell.id, stream: false });
+  const current = await buildCurrentOperationContext(project, record);
+  assert.match(current.handoff, /EVIDENCE CURRENT/);
+
+  writeFileSync(join(project.root, 'later.txt'), 'changed after the run');
+  const stale = await buildCurrentOperationContext(project, record);
+  assert.match(stale.handoff, /EVIDENCE STALE/);
+  assert.match(stale.handoff, new RegExp(`RUN_HEAD ${record.currencyAfter.head}`));
+  assert.match(stale.handoff, /CURRENT_HEAD [0-9a-f]{40}/);
+  assert.match(stale.handoff, new RegExp(`RAW run:${record.id}`));
 });
 
 test('runs store before/after currency and legacy records remain unknown', async () => {

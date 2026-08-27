@@ -327,6 +327,38 @@ export function compareFilesystemFiles(leftPath, rightPath, { base = process.cwd
   };
 }
 
+export function inspectRuntimeAuthority({ executingPath, project = null, env = process.env } = {}) {
+  const executing = filesystemIdentity(executingPath);
+  const productId = 'indrolend/hate.this.meaningless.life';
+  const registeredDirectory = join(stateRoot(env), 'projects');
+  const registered = existsSync(registeredDirectory)
+    ? readdirSync(registeredDirectory, { withFileTypes: true })
+      .filter((entry) => entry.isFile() && entry.name.endsWith('.json'))
+      .map((entry) => readJson(join(registeredDirectory, entry.name)))
+      .filter((entry) => entry?.id === productId && typeof entry.root === 'string')
+    : [];
+  const sourceCandidates = [...new Set(registered.map((entry) => resolve(entry.root)))]
+    .map((root) => ({ root, cli: filesystemIdentity(join(root, 'packages', 'commandhud', 'cli.mjs')) }))
+    .filter((entry) => entry.cli.exists);
+  const source = sourceCandidates.length === 1 ? sourceCandidates[0] : null;
+  const sameBytes = source && executing.type === 'file' ? source.cli.sha256 === executing.sha256 : null;
+  const projectCopies = project
+    ? ['tools/hud/cli.mjs'].map((path) => ({ path, identity: filesystemIdentity(path, { base: project.root }) })).filter((entry) => entry.identity.exists)
+    : [];
+  const status = projectCopies.length || sourceCandidates.length > 1 ? 'DUPLICATE'
+    : source ? (sameBytes ? 'CURRENT' : 'STALE') : 'UNKNOWN';
+  return {
+    status,
+    productId,
+    executing: { ...executing, role: executing.path.includes(`${join('node_modules', '@indrolend', 'hate-this-meaningless-life')}`) ? 'installed' : 'source' },
+    source,
+    sameBytes,
+    sourceCandidates,
+    project: project ? { id: project.identity.id, root: project.root } : null,
+    projectCopies,
+  };
+}
+
 export async function recordFilesystemComparison(project, leftPath, rightPath, { stream = false } = {}) {
   if (typeof leftPath !== 'string' || typeof rightPath !== 'string') throw new Error('hud compare-files requires two filesystem paths.');
   const moduleUrl = new URL('./core.mjs', import.meta.url).href;
@@ -1235,7 +1267,7 @@ function evidenceSize(path) {
   try { return path && existsSync(path) ? statSync(path).size : 0; } catch { return 0; }
 }
 
-export function buildOperationContext(project, record) {
+export function buildOperationContext(project, record, { currentCurrency = null } = {}) {
   if (!record?.operation) throw new Error('The last run has no structured operation to hand off.');
   const operation = record.operation;
   const operationCwd = operation.cwdAfter || operation.cwdBefore || record.cwd || project.root;
@@ -1244,9 +1276,16 @@ export function buildOperationContext(project, record) {
     `REPO ${basename(project.root)}`,
     `BRANCH ${record.gitAfter?.branch || record.branch}`,
     `CWD ${operation.scope || (!cwdInside || cwdInside.startsWith('..') ? '.' : cwdInside)}`,
-    '',
-    `OPERATION ${operation.type.toUpperCase()}`,
   ];
+  if (currentCurrency) {
+    const evidence = classifyEvidence(record.currencyAfter, currentCurrency);
+    lines.push(`EVIDENCE ${evidence}`);
+    if (evidence === 'STALE') {
+      lines.push(`RUN_HEAD ${record.currencyAfter?.head || 'unknown'}`);
+      lines.push(`CURRENT_HEAD ${currentCurrency.head}`);
+    }
+  }
+  lines.push('', `OPERATION ${operation.type.toUpperCase()}`);
   if (operation.type === 'search') {
     lines.push(`QUERY ${operation.query}`);
     lines.push(`COMMAND ${operation.command}`);
@@ -1334,6 +1373,12 @@ export function buildOperationContext(project, record) {
       reductionPercent: rawBytes > 0 ? Math.max(0, Math.round((1 - contextBytes / rawBytes) * 1000) / 10) : 0,
     },
   };
+}
+
+export async function buildCurrentOperationContext(project, record) {
+  return buildOperationContext(project, record, {
+    currentCurrency: await repositoryCurrency(project.root, project.identity.id),
+  });
 }
 
 export function buildOperationHandoff(project, record) {
@@ -1667,7 +1712,7 @@ export async function operationDetail(project, id) {
   const record = runById(project, id);
   if (!record?.operation) return null;
   const currency = await repositoryCurrency(project.root, project.identity.id);
-  const context = buildOperationContext(project, record);
+  const context = buildOperationContext(project, record, { currentCurrency: currency });
   return {
     runId: record.id,
     operation: record.operation,

@@ -3,7 +3,7 @@ import { basename, relative } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { PassThrough } from 'node:stream';
 import {
-  buildOperationContext, diffRunEvidence, discoverShells, lastRun, listRuns, projectRunEvidence, runById,
+  buildCurrentOperationContext, buildOperationContext, diffRunEvidence, discoverShells, lastRun, listRuns, projectRunEvidence, runById,
   runTerminalCommand, undoOperation, undoPlan,
 } from './core.mjs';
 import { createShellVisualStatus, IDLE_FACE, visualMotionEnabled } from './shell-visual.mjs';
@@ -46,9 +46,9 @@ export function renderShellEvidenceProjection(value) {
   return lines.join('\n').trimEnd();
 }
 
-export function renderShellResult(project, record) {
+export function renderShellResult(project, record, suppliedContext = null) {
   const operation = record.operation;
-  const context = buildOperationContext(project, record);
+  const context = suppliedContext || buildOperationContext(project, record);
   const lines = [
     `${record.status.toUpperCase()} · exit ${record.exitCode ?? 'none'} · ${(record.durationMs / 1000).toFixed(1)}s`,
   ];
@@ -60,9 +60,10 @@ export function renderShellResult(project, record) {
   return lines.join('\n');
 }
 
-export function deliverShellResult(project, record, output, clipboardWriter = clipboard) {
-  const context = buildOperationContext(project, record).handoff;
-  output.write(`${renderShellResult(project, record)}\n\nSHORTENED OUTPUT\n${context}\n`);
+export async function deliverShellResult(project, record, output, clipboardWriter = clipboard) {
+  const currentContext = await buildCurrentOperationContext(project, record);
+  const context = currentContext.handoff;
+  output.write(`${renderShellResult(project, record, currentContext)}\n\nSHORTENED OUTPUT\n${context}\n`);
   try {
     clipboardWriter(context);
     output.write(`\nCOPIED · run:${record.id}\n\n`);
@@ -205,7 +206,7 @@ export async function startHudShell(project, {
         const selected = requested ? runById(project, requested) : previous;
         if (!selected?.operation) show(`${requested ? `No structured run found for ${requested}.` : 'No structured command has been recorded yet.'}\n\n`);
         else {
-          const value = buildOperationContext(project, selected).handoff;
+          const value = (await buildCurrentOperationContext(project, selected)).handoff;
           if (action === '/copy') {
             try { clipboardWriter(value); show(`COPIED run:${selected.id}\n\n${value}`); }
             catch (error) { show(`NOT COPIED · ${error.message}\nContext remains available with /context ${selected.id}.\n\n`); }
@@ -272,12 +273,12 @@ export async function startHudShell(project, {
         await visualStatus.finish(record.status);
         cwd = record.operation.cwdAfter;
         if (layout.active) {
-          const context = buildOperationContext(project, record).handoff;
+          const context = (await buildCurrentOperationContext(project, record)).handoff;
           let copyState;
           try { clipboardWriter(context); copyState = `COPIED · run:${record.id}`; }
           catch (error) { copyState = `NOT COPIED · ${error.message} · use /copy to retry`; }
           show(`SHORTENED OUTPUT\n${context}\n\n${copyState}`);
-        } else deliverShellResult(project, record, output, clipboardWriter);
+        } else await deliverShellResult(project, record, output, clipboardWriter);
       } catch (error) {
         await visualStatus.finish(error.name === 'AbortError' ? 'interrupted' : 'fail');
         show(`ERROR · ${error.message}\n\n`);

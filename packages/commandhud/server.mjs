@@ -2,7 +2,7 @@ import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSy
 import { createServer } from 'node:http';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildOperationContext, classifyEvidence, currentState, discoverShells, lastRun, operationDetail, operationHistory, recoverInterruptedRuns, repositoryCurrency, repositoryTree, runById, runRepositoryCommand, runTerminalCommand, searchRepository, undoOperation, undoPlan } from './core.mjs';
+import { buildCurrentOperationContext, classifyEvidence, currentState, discoverShells, lastRun, operationDetail, operationHistory, recoverInterruptedRuns, repositoryCurrency, repositoryTree, runById, runRepositoryCommand, runTerminalCommand, searchRepository, undoOperation, undoPlan } from './core.mjs';
 
 const staticRoot = join(dirname(fileURLToPath(import.meta.url)), 'visual-prototype');
 const contentTypes = {
@@ -438,7 +438,7 @@ export function createHudServer(project, { terminal = false, onSessionClientsCha
       if (url.pathname === '/handoff') {
         const record = lastRun(project);
         if (!record?.operation) throw Object.assign(new Error('No structured operation is available to hand off.'), { statusCode: 404 });
-        const context = buildOperationContext(project, record);
+        const context = await buildCurrentOperationContext(project, record);
         json(response, 200, { runId: record.id, handoff: context.handoff, metrics: context.metrics });
         return;
       }

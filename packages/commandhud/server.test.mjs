@@ -192,6 +192,7 @@ test('HUD server serializes typed operations and exposes bounded evidence, live 
   assert.equal(handoffResponse.status, 200);
   const handoff = await handoffResponse.json();
   assert.equal(handoff.runId, state.last.runId);
+  assert.match(handoff.handoff, /EVIDENCE CURRENT/);
   assert.match(handoff.handoff, new RegExp(`RAW run:${state.last.runId}`));
   assert.match(handoff.handoff, /media\/tone\.wav 1 lines=1/);
   assert.equal(typeof handoff.metrics.rawBytes, 'number');
