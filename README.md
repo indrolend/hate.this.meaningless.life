@@ -105,6 +105,8 @@ Projects may expose additional typed commands without changing CommandHUD:
 
 The browser requests the stable `name`; the runtime rereads the repository declaration, validates its owner path, and executes the recorded `argv`. It does not accept browser-supplied shell text. Optional `kind` values (`test`, `audit`, or `smoke`) select a generic reducer. Literal success markers add project-owned factual summaries only after exit 0. `resultMarkers: true` records strict `NAME=PASS|FAIL key=value` lines with their stream and line number; these facts never override the real process exit status.
 
+Composite verification commands may optionally declare one `stageMarker` plus literal repository file/directory scopes in `stages`. CommandHUD records that model with the run. `hud impact <name>` can then compare retained passing stage evidence with current changed paths without rerunning the command. Undeclared or changed dependency models remain unknown; impact never skips verification or synthesizes PASS.
+
 CommandHUD refuses execution outside a Git repository unless an explicit `--root` selects one.
 
 ## Verification

@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildCurrentOperationContext, buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, classifyPowerShellShellFailure, classifyProofCurrency, compareFilesystemFiles, continuation, currentState, detectRepeatedOperationSequences, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, formatRepositoryCommandProof, gitSnapshot, inspectRuntimeAuthority, lintRepository, listRuns, operationDetail, operationHistory, parseLintDiagnostics, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCommandProof, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
+import { buildCurrentOperationContext, buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, classifyPowerShellShellFailure, classifyProofCurrency, compareFilesystemFiles, continuation, currentState, detectRepeatedOperationSequences, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, formatRepositoryCommandImpact, formatRepositoryCommandProof, gitSnapshot, inspectRuntimeAuthority, lintRepository, listRuns, operationDetail, operationHistory, parseLintDiagnostics, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCommandImpact, repositoryCommandProof, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -26,11 +26,18 @@ function fixtureProject() {
 
 async function proofFixtureProject() {
   const root = fixture();
+  mkdirSync(join(root, 'src'));
+  mkdirSync(join(root, 'src', 'a'));
+  mkdirSync(join(root, 'src', 'b'));
+  writeFileSync(join(root, 'src', 'a', 'file.txt'), 'a\n');
+  writeFileSync(join(root, 'src', 'b', 'file.txt'), 'b\n');
   const identityPath = join(root, 'distribution', 'project.json');
   const identity = JSON.parse(readFileSync(identityPath, 'utf8'));
   identity.commandHud = { commands: [{
-    name: 'verify', command: 'node -e "console.log(\'VERIFY=PASS\')"',
-    argv: [process.execPath, '-e', "console.log('VERIFY=PASS')"], resultMarkers: true,
+    name: 'verify', command: 'node -e "verification markers"',
+    argv: [process.execPath, '-e', "console.log('VERIFY_STAGE=PASS name=a'); console.log('VERIFY_STAGE=PASS name=b'); console.log('VERIFY_STAGE=PASS name=undeclared'); console.log('VERIFY=PASS')"],
+    resultMarkers: true, stageMarker: 'VERIFY_STAGE',
+    stages: [{ name: 'a', paths: ['src/a'] }, { name: 'b', paths: ['src/b'] }],
   }] };
   writeFileSync(identityPath, JSON.stringify(identity, null, 2));
   writeFileSync(join(root, '.gitignore'), 'ignored-proof.txt\n');
@@ -94,6 +101,15 @@ test('run evidence diff compares immutable streams without rerunning either comm
   assert.doesNotMatch(value.streams[0].text, /CommandHud|stdout\.log/);
   assert.equal(value.streams[1].different, false);
   assert.equal(value.streams[1].text, '');
+
+  const hugeLeft = await runCommand(project, [process.execPath, '-e', "process.stdout.write('a'.repeat(9 * 1024 * 1024))"], { stream: false, shell: false });
+  const hugeRight = await runCommand(project, [process.execPath, '-e', "process.stdout.write('b'.repeat(9 * 1024 * 1024))"], { stream: false, shell: false });
+  const hugeDiff = await diffRunEvidence(project, hugeLeft.id, hugeRight.id);
+  assert.equal(hugeDiff.different, true);
+  assert.equal(hugeDiff.streams[0].truncated, true);
+  assert.match(hugeDiff.streams[0].text, /LARGE_EVIDENCE_DIFF stdout/);
+  assert.match(hugeDiff.streams[0].text, /sha256:[0-9a-f]{64}/);
+  assert.ok(hugeDiff.streams[0].text.length < 1024);
 });
 
 test('filesystem identity reports real bytes and file comparison avoids metadata guesses', () => {
@@ -286,6 +302,12 @@ test('repository command declarations fail closed when malformed, duplicate, or 
   writeCommands([{ name: 'markers', command: 'node markers.mjs', argv: ['node', 'markers.mjs'], resultMarkers: 'yes' }]);
   assert.throws(() => discoverCommands(root), /Invalid CommandHUD result marker declaration/);
 
+  writeCommands([{ name: 'stages', command: 'node stages.mjs', argv: ['node', 'stages.mjs'], stages: [{ name: 'a', paths: ['src'] }] }]);
+  assert.throws(() => discoverCommands(root), /Invalid CommandHUD stage declaration/);
+
+  writeCommands([{ name: 'stage-path', command: 'node stages.mjs', argv: ['node', 'stages.mjs'], stageMarker: 'VERIFY_STAGE', stages: [{ name: 'a', paths: ['../outside'] }] }]);
+  assert.throws(() => discoverCommands(root), /Invalid CommandHUD stage declaration/);
+
   writeCommands([{ name: 'npm:test', command: 'node other.mjs', argv: ['node', 'other.mjs'] }]);
   assert.throws(() => discoverCommands(root), /Duplicate repository command identity/);
 
@@ -423,10 +445,66 @@ test('repository proof fails closed for failed attempts and missing raw evidence
 
   const incompleteProject = await proofFixtureProject();
   const pass = await runRepositoryCommand(incompleteProject, 'verify');
+  writeFileSync(pass.stdoutPath, 'tampered retained evidence\n');
+  const corrupt = await repositoryCommandProof(incompleteProject, 'verify');
+  assert.equal(corrupt.state, 'MISSING');
+  assert.equal(corrupt.integrity, 'CORRUPT');
+  assert.match(corrupt.reason, /integrity check/i);
   rmSync(pass.stderrPath);
   const incomplete = await repositoryCommandProof(incompleteProject, 'verify');
   assert.equal(incomplete.state, 'MISSING');
   assert.equal(incomplete.reusable, false);
+});
+
+test('repository impact reports factual path changes and conservative stage currency without creating a run', async () => {
+  const project = await proofFixtureProject();
+  const record = await runRepositoryCommand(project, 'verify');
+  const count = () => listRuns(project, Number.MAX_SAFE_INTEGER).length;
+  const countAfterRun = count();
+
+  const unchanged = await repositoryCommandImpact(project, 'verify');
+  assert.equal(unchanged.state, 'CURRENT');
+  assert.deepEqual(unchanged.changedPaths, []);
+  assert.deepEqual(unchanged.stages.map(({ name, recordedStatus, state }) => ({ name, recordedStatus, state })), [
+    { name: 'a', recordedStatus: 'PASS', state: 'CURRENT' },
+    { name: 'b', recordedStatus: 'PASS', state: 'CURRENT' },
+    { name: 'undeclared', recordedStatus: 'PASS', state: 'CURRENT' },
+  ]);
+  assert.equal(unchanged.raw.stdout, record.stdoutPath);
+  assert.equal(count(), countAfterRun);
+  assert.match(formatRepositoryCommandImpact(unchanged), new RegExp(`IMPACT verify[\\s\\S]*RUN ${record.id}[\\s\\S]*a PASS CURRENT[\\s\\S]*RAW run:${record.id}`));
+  assert.doesNotThrow(() => JSON.stringify(unchanged));
+
+  writeFileSync(join(project.root, 'src', 'b', 'file.txt'), 'changed b\n');
+  const changed = await repositoryCommandImpact(project, 'verify');
+  assert.equal(changed.state, 'STALE');
+  assert.deepEqual(changed.changedPaths, ['src/b/file.txt']);
+  assert.equal(changed.stages.find(({ name }) => name === 'a').state, 'CURRENT');
+  assert.equal(changed.stages.find(({ name }) => name === 'b').state, 'STALE');
+  assert.equal(changed.stages.find(({ name }) => name === 'undeclared').state, 'UNKNOWN');
+  assert.equal(count(), countAfterRun);
+
+  const identityPath = join(project.root, 'distribution', 'project.json');
+  const retainedIdentity = readFileSync(identityPath, 'utf8');
+  const changedIdentity = JSON.parse(retainedIdentity);
+  changedIdentity.commandHud.commands[0].stages[0].paths = ['src/b'];
+  writeFileSync(identityPath, JSON.stringify(changedIdentity, null, 2));
+  const changedModel = await repositoryCommandImpact(project, 'verify');
+  assert.equal(changedModel.stages.find(({ name }) => name === 'a').state, 'UNKNOWN');
+  assert.match(changedModel.stages.find(({ name }) => name === 'a').reason, /declaration differs/);
+  writeFileSync(identityPath, retainedIdentity);
+
+  writeFileSync(join(project.root, 'src', 'b', 'file.txt'), 'b\n');
+  assert.equal((await repositoryCommandImpact(project, 'verify')).state, 'CURRENT');
+  writeFileSync(join(project.root, 'src', 'a', 'untracked.txt'), 'new\n');
+  assert.equal((await repositoryCommandImpact(project, 'verify')).stages.find(({ name }) => name === 'a').state, 'STALE');
+  rmSync(join(project.root, 'src', 'a', 'untracked.txt'));
+  writeFileSync(join(project.root, 'ignored-proof.txt'), 'ignored\n');
+  assert.equal((await repositoryCommandImpact(project, 'verify')).state, 'CURRENT');
+  rmSync(join(project.root, 'ignored-proof.txt'));
+  assert.equal(count(), countAfterRun);
+  assert.equal(execFileSync('git', ['status', '--short'], { cwd: project.root, encoding: 'utf8' }), '');
+  await assert.rejects(() => repositoryCommandImpact(project, 'missing'), /Unknown repository command/);
 });
 
 test('lint diagnostics retain only factual repository-contained file locations', () => {
@@ -474,6 +552,20 @@ test('typed lint resolves declared authority and records markers, diagnostics, a
   assert.match(buildOperationHandoff(project, record), /RESULT PASS exit=0 diagnostics=1 files=1/);
   assert.match(buildOperationHandoff(project, record), /src\/app\.js:1:7 warning fixture-rule fixture warning/);
 
+  writeFileSync(join(root, 'tools', 'lint.mjs'), [
+    `for (let line = 1; line <= 1200; line++) console.log('src/app.js:' + line + ':7: warning: ' + 'x'.repeat(1000) + ' [fixture-rule]');`,
+    `console.log('LINT=PASS javascript=1');`,
+  ].join('\n'));
+  const large = await lintRepository(project, { origin: 'cli-argv' });
+  assert.equal(large.operation.diagnosticCount, 1200);
+  assert.equal(large.operation.fileCount, 1);
+  assert.equal(large.operation.diagnostics.length, 1000);
+  assert.equal(large.operation.detailsTruncated, true);
+  assert.equal(large.capture.mode, 'bounded');
+  assert.equal(large.capture.stdoutTruncated, true);
+  assert.ok(readFileSync(large.stdoutPath).length > 1024 * 1024);
+  assert.match(buildOperationHandoff(project, large), /DETAILS BOUNDED/);
+
   const missing = await fixtureProject();
   await assert.rejects(() => lintRepository(missing), /does not declare a lint command/);
   assert.equal(listRuns(missing, 10).length, 0);
@@ -520,7 +612,8 @@ test('startup recovery records inactive in-flight evidence and preserves Undo', 
   const treeBefore = execFileSync('git', ['rev-parse', 'HEAD^{tree}'], { cwd: project.root, encoding: 'utf8' }).trim();
   const stdoutPath = join(directory, 'stdout.log');
   const stderrPath = join(directory, 'stderr.log');
-  writeFileSync(stdoutPath, 'STARTED\npartial output\n');
+  const interruptedOutput = `VERIFY_STAGE=PASS name=before\n${'x'.repeat(2 * 1024 * 1024)}\nVERIFY_STAGE=PASS name=after\n`;
+  writeFileSync(stdoutPath, interruptedOutput);
   writeFileSync(stderrPath, '');
   writeFileSync(join(project.root, 'interrupted.txt'), 'partial change\n');
   writeFileSync(join(directory, 'inflight.json'), JSON.stringify({
@@ -528,6 +621,7 @@ test('startup recovery records inactive in-flight evidence and preserves Undo', 
     request: 'run repository command fixture', command: 'node fixture.mjs', argv: ['node', 'fixture.mjs'],
     objective: 'Run fixture', startedAt: '2026-08-24T22:00:00.000Z', pid: 2147483647,
     captureDelta: true, treeBefore, gitBefore: before, currencyBefore, stdoutPath, stderrPath,
+    resultMarkers: true,
     operationIdentity: { type: 'repository-command', name: 'fixture', displayCommand: 'node fixture.mjs' },
   }));
 
@@ -539,7 +633,11 @@ test('startup recovery records inactive in-flight evidence and preserves Undo', 
   assert.deepEqual(record.provenance, { origin: 'legacy-unknown', finalizedBy: 'startup-recovery' });
   assert.deepEqual(record.operation.provenance, record.provenance);
   assert.deepEqual(record.delta.paths, ['interrupted.txt']);
-  assert.match(readFileSync(record.stdoutPath, 'utf8'), /partial output/);
+  assert.equal(readFileSync(record.stdoutPath, 'utf8'), interruptedOutput);
+  assert.equal(record.capture.stdoutBytes, Buffer.byteLength(interruptedOutput));
+  assert.equal(record.capture.stdoutTruncated, true);
+  assert.ok(record.capture.stdoutCharacters <= 1024 * 1024);
+  assert.deepEqual(record.reduction.markers.map((marker) => marker.fields.name), ['before', 'after']);
   assert.equal(existsSync(join(directory, 'inflight.json')), false);
   assert.equal((await undoPlan(project, id)).state, 'SAFE');
   await undoOperation(project, id);
@@ -716,7 +814,42 @@ test('verified project execution persists immutable evidence and packet', async 
   assert.equal(record.status, 'pass');
   assert.match(readFileSync(record.stdoutPath, 'utf8'), /SMOKE_TEST_OK/);
   assert.match(formatPacket(record.packet), /STATUS=PASS/);
+  assert.equal(record.evidence.stdout.bytes, Buffer.byteLength('SMOKE_TEST_OK\n'));
+  assert.match(record.evidence.stdout.sha256, /^sha256:[0-9a-f]{64}$/);
+  assert.match(record.evidence.stderr.sha256, /^sha256:[0-9a-f]{64}$/);
   assert.ok(readFileSync(record.stdoutPath.replace(/stdout\.log$/, 'run.json'), 'utf8').includes(record.id));
+});
+
+test('bounded execution capture preserves complete raw bytes and markers around enormous output', async () => {
+  const project = await fixtureProject();
+  const enormousCharacters = 2 * 1024 * 1024;
+  const evidenceNeedle = 'CROSS_CHUNK_EVIDENCE_NEEDLE';
+  const leftCharacters = 1024 * 1024;
+  const rightCharacters = enormousCharacters - leftCharacters - evidenceNeedle.length;
+  const before = 'VERIFY_STAGE=PASS name=before\n';
+  const after = '\nVERIFY_STAGE=PASS name=after\n';
+  const expectedBytes = Buffer.byteLength(before) + enormousCharacters + Buffer.byteLength(after);
+  const script = `process.stdout.write(${JSON.stringify(before)});process.stdout.write('x'.repeat(${leftCharacters}));process.stdout.write(${JSON.stringify(evidenceNeedle)});process.stdout.write('x'.repeat(${rightCharacters}));process.stdout.write(${JSON.stringify(after)})`;
+  const record = await runCommand(project, [process.execPath, '-e', script], { stream: false, shell: false, resultMarkers: true });
+
+  assert.equal(record.status, 'pass');
+  assert.equal(record.capture.mode, 'bounded');
+  assert.equal(record.capture.stdoutBytes, expectedBytes);
+  assert.equal(record.capture.stdoutTruncated, true);
+  assert.equal(record.capture.stdoutCharacters, 1024 * 1024);
+  assert.equal(readFileSync(record.stdoutPath).length, expectedBytes);
+  assert.deepEqual(record.reduction.markers.map((marker) => marker.fields.name), ['before', 'after']);
+  assert.ok(record.reduction.tail.every((line) => line.length <= 2000));
+  assert.ok(JSON.stringify(record.presentation).length < 5000);
+  const head = projectRunEvidence(project, record.id, { mode: 'head', count: 2 }).streams[0];
+  assert.equal(head.totalLines, 3);
+  assert.equal(head.lines[1].number, 2);
+  assert.ok(head.lines[1].text.length <= 8192);
+  assert.match(head.lines[1].text, /characters retained in raw evidence/);
+  const found = projectRunEvidence(project, record.id, { mode: 'find', pattern: evidenceNeedle }).streams[0];
+  assert.equal(found.matchCount, 1);
+  assert.equal(found.lines[0].number, 2);
+  assert.ok(found.lines[0].text.length <= 8192);
 });
 
 test('failed commands remain failed while preserving raw stderr', async () => {
@@ -1028,6 +1161,23 @@ test('search records real scoped matches, truthful zero results, raw evidence, a
   assert.deepEqual(zero.operation.files, []);
   assert.equal(zero.operation.matchCount, 0);
 
+  writeFileSync(join(project.root, 'src', 'huge.txt'), Array.from({ length: 300 }, () => `huge-needle ${'x'.repeat(9000)}`).join('\n'));
+  const huge = await searchRepository(project, 'huge-needle', 'src');
+  assert.equal(huge.operation.matchCount, 300);
+  assert.equal(huge.operation.fileCount, 1);
+  assert.equal(huge.operation.files[0].count, 300);
+  assert.equal(huge.operation.files[0].lines.length, 200);
+  assert.equal(huge.operation.files[0].linesTruncated, true);
+  assert.equal(huge.operation.detailsTruncated, true);
+  assert.equal(huge.capture.mode, 'bounded');
+  assert.equal(huge.capture.stdoutTruncated, true);
+  assert.ok(readFileSync(huge.stdoutPath).length > 2 * 1024 * 1024);
+  assert.match(buildOperationHandoff(project, huge), /DETAILS BOUNDED/);
+
+  const singleFile = await searchRepository(project, 'huge-needle', 'src/huge.txt');
+  assert.equal(singleFile.operation.matchCount, 300);
+  assert.equal(singleFile.operation.files[0].path, 'src/huge.txt');
+
   const failed = await searchRepository(project, 'needle', 'src', { tool: process.execPath });
   assert.equal(failed.status, 'fail');
   assert.equal(failed.operation.matchCount, 0);
@@ -1087,8 +1237,8 @@ test('terminal context export is truthful, bounded, and benchmarked against raw 
   const shells = await discoverShells(project.root);
   const shell = shells.find((entry) => entry.available && entry.id === (process.platform === 'win32' ? 'powershell' : 'bash'));
   const command = shell.id === 'powershell'
-    ? "1..120 | ForEach-Object { Write-Output (('line {0} ' -f $_) + ('x' * 100)) }; [Console]::Error.WriteLine('TERMINAL_ERROR_EVIDENCE')"
-    : "for i in $(seq 1 120); do printf 'line %s %100s\\n' \"$i\" x; done; printf 'TERMINAL_ERROR_EVIDENCE\\n' >&2";
+    ? "Write-Output ('y' * (2 * 1024 * 1024)); 1..120 | ForEach-Object { Write-Output (('line {0} ' -f $_) + ('x' * 100)) }; [Console]::Error.WriteLine('TERMINAL_ERROR_EVIDENCE')"
+    : "printf '%*s\\n' 2097152 ''; for i in $(seq 1 120); do printf 'line %s %100s\\n' \"$i\" x; done; printf 'TERMINAL_ERROR_EVIDENCE\\n' >&2";
   const record = await runTerminalCommand(project, command, { shell: shell.id });
   const context = await buildCurrentOperationContext(project, record);
   assert.match(context.handoff, /EVIDENCE CURRENT/);
@@ -1099,6 +1249,8 @@ test('terminal context export is truthful, bounded, and benchmarked against raw 
   assert.doesNotMatch(context.handoff, /line 1 x/);
   assert.match(context.handoff, /STDERR_EXCERPT\nTERMINAL_ERROR_EVIDENCE/);
   assert.match(context.handoff, new RegExp(`RAW run:${record.id}`));
+  assert.ok(readFileSync(record.stdoutPath).length > 2 * 1024 * 1024);
+  assert.ok(context.metrics.contextBytes < 10 * 1024);
   assert.ok(context.metrics.rawBytes > context.metrics.contextBytes);
   assert.ok(context.metrics.reductionPercent > 0);
   assert.equal(context.metrics.savedBytes, context.metrics.rawBytes - context.metrics.contextBytes);

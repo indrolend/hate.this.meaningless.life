@@ -261,7 +261,7 @@ test('HUD server serializes typed operations and exposes bounded evidence, live 
   assert.equal(searchResponse.status, 200);
   const search = await searchResponse.json();
   assert.equal(search.status, 'pass');
-  assert.equal(search.operation.command, 'rg -n --no-heading --color never --fixed-strings -- RIFF media');
+  assert.equal(search.operation.command, 'rg -n --no-heading --with-filename --color never --fixed-strings -- RIFF media');
   assert.deepEqual(search.operation.files, [{ path: 'media/tone.wav', count: 1, lines: [1] }]);
   assert.equal(search.state.last.runId, search.runId);
   assert.deepEqual(search.state.lastOperation, search.operation);

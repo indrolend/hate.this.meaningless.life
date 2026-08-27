@@ -1,8 +1,9 @@
 import { createHash, randomBytes } from 'node:crypto';
 import { execFile, spawn } from 'node:child_process';
-import { closeSync, createWriteStream, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
+import { closeSync, createReadStream, createWriteStream, existsSync, fsyncSync, mkdirSync, mkdtempSync, openSync, readFileSync, readSync, readdirSync, renameSync, rmSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir, platform, tmpdir } from 'node:os';
 import { basename, dirname, isAbsolute, join, relative, resolve } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { promisify } from 'node:util';
 
 const execFileAsync = promisify(execFile);
@@ -607,6 +608,8 @@ function repositoryCommandDefinitions(root) {
     const successMarkers = entry?.successMarkers || [];
     const resultMarkers = entry?.resultMarkers ?? false;
     const kind = entry?.kind || null;
+    const stageMarker = entry?.stageMarker ?? null;
+    const stages = entry?.stages ?? [];
     if (!/^[a-z0-9][a-z0-9:._-]*$/i.test(name) || !command || !Array.isArray(argv) || !argv.length || argv.some((value) => typeof value !== 'string' || !value)) {
       throw new Error(`Invalid CommandHUD command declaration: ${name || '(unnamed)'}`);
     }
@@ -617,6 +620,20 @@ function repositoryCommandDefinitions(root) {
     }
     if (typeof resultMarkers !== 'boolean') throw new Error(`Invalid CommandHUD result marker declaration: ${name}`);
     if (kind !== null && !['test', 'audit', 'smoke', 'lint'].includes(kind)) throw new Error(`Invalid CommandHUD command kind: ${name}`);
+    if (stageMarker !== null && (typeof stageMarker !== 'string' || !/^[A-Z][A-Z0-9_]{1,63}$/.test(stageMarker))) {
+      throw new Error(`Invalid CommandHUD stage marker declaration: ${name}`);
+    }
+    if (!Array.isArray(stages) || stages.some((stage) => {
+      const stageName = typeof stage?.name === 'string' ? stage.name.trim() : '';
+      const paths = stage?.paths;
+      return !/^[a-z0-9][a-z0-9:._-]*$/i.test(stageName) || !Array.isArray(paths) || !paths.length || paths.some((path) => {
+        if (typeof path !== 'string' || !path.trim() || path.includes('\0') || /[*?\[\]]/.test(path)) return true;
+        const normalized = path.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/$/, '') || '.';
+        return normalized !== '.' && (normalized.startsWith('/') || /^[A-Za-z]:\//.test(normalized) || normalized === '..' || normalized.startsWith('../') || normalized.includes('/../'));
+      });
+    }) || new Set(stages.map((stage) => stage.name)).size !== stages.length || (stages.length && !stageMarker)) {
+      throw new Error(`Invalid CommandHUD stage declaration: ${name}`);
+    }
     if (owner) {
       const ownerPath = resolve(root, owner);
       const ownerRelative = relative(root, ownerPath);
@@ -626,7 +643,14 @@ function repositoryCommandDefinitions(root) {
       if (!existsSync(ownerPath)) continue;
     }
     if (commands.some((item) => item.name === name)) throw new Error(`Duplicate repository command identity: ${name}`);
-    commands.push({ name, command, argv: [...argv], kind, resultMarkers, successMarkers: successMarkers.map((marker) => ({ contains: marker.contains, summary: marker.summary })) });
+    commands.push({
+      name, command, argv: [...argv], kind, resultMarkers, stageMarker,
+      stages: stages.map((stage) => ({
+        name: stage.name.trim(),
+        paths: stage.paths.map((path) => path.replaceAll('\\', '/').replace(/^\.\//, '').replace(/\/$/, '') || '.'),
+      })),
+      successMarkers: successMarkers.map((marker) => ({ contains: marker.contains, summary: marker.summary })),
+    });
   }
   return commands;
 }
@@ -658,25 +682,72 @@ function firstMatch(text, patterns) {
   return null;
 }
 
+function parseResultMarkerLine(rawLine, stream, lineNumber) {
+  const line = rawLine.trim();
+  const match = line.match(/^([A-Z][A-Z0-9_]{1,63})=(PASS|FAIL)(?:\s+(.*))?$/);
+  if (!match) return null;
+  const fields = {};
+  for (const token of match[3]?.split(/\s+/).filter(Boolean) || []) {
+    const field = token.match(/^([A-Za-z][A-Za-z0-9_.-]{0,63})=([^\s=]+)$/);
+    if (!field || Object.hasOwn(fields, field[1])) return null;
+    fields[field[1]] = field[2];
+  }
+  return { event: match[1], status: match[2], fields, stream, line: lineNumber, raw: line };
+}
+
 export function parseResultMarkers(stdout, stderr = '') {
   const markers = [];
   for (const [stream, content] of [['stdout', stdout], ['stderr', stderr]]) {
     const lines = String(content || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n').split('\n');
     for (const [index, rawLine] of lines.entries()) {
-      const line = rawLine.trim();
-      const match = line.match(/^([A-Z][A-Z0-9_]{1,63})=(PASS|FAIL)(?:\s+(.*))?$/);
-      if (!match) continue;
-      const fields = {};
-      let valid = true;
-      for (const token of match[3]?.split(/\s+/).filter(Boolean) || []) {
-        const field = token.match(/^([A-Za-z][A-Za-z0-9_.-]{0,63})=([^\s=]+)$/);
-        if (!field || Object.hasOwn(fields, field[1])) { valid = false; break; }
-        fields[field[1]] = field[2];
-      }
-      if (valid) markers.push({ event: match[1], status: match[2], fields, stream, line: index + 1, raw: line });
+      const marker = parseResultMarkerLine(rawLine, stream, index + 1);
+      if (marker) markers.push(marker);
     }
   }
   return markers;
+}
+
+function createResultMarkerCollector(enabled) {
+  const markers = [];
+  const states = Object.fromEntries(['stdout', 'stderr'].map((stream) => [stream, { remainder: '', discarding: false, line: 0 }]));
+  const observe = (stream, value) => {
+    if (!enabled) return;
+    const state = states[stream];
+    const text = String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    let offset = 0;
+    while (offset < text.length) {
+      const newline = text.indexOf('\n', offset);
+      if (newline < 0) {
+        const part = text.slice(offset);
+        if (!state.discarding) {
+          if (state.remainder.length + part.length <= 8192) state.remainder += part;
+          else { state.remainder = ''; state.discarding = true; }
+        }
+        break;
+      }
+      const part = text.slice(offset, newline);
+      state.line++;
+      if (!state.discarding && state.remainder.length + part.length <= 8192) {
+        const marker = parseResultMarkerLine(`${state.remainder}${part}`, stream, state.line);
+        if (marker) markers.push(marker);
+      }
+      state.remainder = '';
+      state.discarding = false;
+      offset = newline + 1;
+    }
+  };
+  const finish = () => {
+    if (!enabled) return [];
+    for (const [stream, state] of Object.entries(states)) {
+      if (!state.discarding && state.remainder) {
+        state.line++;
+        const marker = parseResultMarkerLine(state.remainder, stream, state.line);
+        if (marker) markers.push(marker);
+      }
+    }
+    return markers;
+  };
+  return { observe, finish };
 }
 
 export function parseLintDiagnostics(stdout, stderr = '', root = process.cwd()) {
@@ -705,6 +776,60 @@ export function parseLintDiagnostics(stdout, stderr = '', root = process.cwd()) 
     }
   }
   return diagnostics.sort((a, b) => a.path.localeCompare(b.path, 'en') || a.line - b.line || a.column - b.column || a.message.localeCompare(b.message, 'en'));
+}
+
+function createLintOutputCollector(root, { maxDiagnostics = 1000, maxLineCharacters = 8192 } = {}) {
+  const retained = [];
+  const seen = new Set();
+  const files = new Set();
+  const states = Object.fromEntries(['stdout', 'stderr'].map((stream) => [stream, { remainder: '', discarding: false }]));
+  let detailsTruncated = false;
+  const consume = (row, lineTruncated = false) => {
+    for (const diagnostic of parseLintDiagnostics(row, '', root)) {
+      const key = JSON.stringify(diagnostic);
+      if (seen.has(key)) continue;
+      seen.add(key);
+      files.add(diagnostic.path);
+      if (retained.length < maxDiagnostics) retained.push(lineTruncated ? { ...diagnostic, messageTruncated: true } : diagnostic);
+      else detailsTruncated = true;
+    }
+    if (lineTruncated) detailsTruncated = true;
+  };
+  const observe = (stream, value) => {
+    const state = states[stream];
+    if (!state) return;
+    const text = String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    let offset = 0;
+    while (offset < text.length) {
+      const newline = text.indexOf('\n', offset);
+      if (newline < 0) {
+        const part = text.slice(offset);
+        if (!state.discarding) {
+          if (state.remainder.length + part.length <= maxLineCharacters) state.remainder += part;
+          else { state.remainder += part.slice(0, Math.max(0, maxLineCharacters - state.remainder.length)); state.discarding = true; }
+        }
+        break;
+      }
+      const part = text.slice(offset, newline);
+      if (!state.discarding) consume(`${state.remainder}${part}`);
+      else consume(state.remainder, true);
+      state.remainder = '';
+      state.discarding = false;
+      offset = newline + 1;
+    }
+  };
+  const finish = () => {
+    for (const state of Object.values(states)) if (state.remainder) consume(state.remainder, state.discarding);
+    retained.sort((a, b) => a.path.localeCompare(b.path, 'en') || a.line - b.line || a.column - b.column || a.message.localeCompare(b.message, 'en'));
+    return {
+      diagnosticCount: seen.size,
+      fileCount: files.size,
+      files: [...files].sort((a, b) => a.localeCompare(b, 'en')),
+      diagnostics: retained,
+      detailsTruncated,
+    };
+  };
+  return { observe, finish };
 }
 
 function decodePowerShellCliXml(value) {
@@ -763,38 +888,50 @@ function normalizeTerminalText(value, root = '') {
   return output.join('\n').trim();
 }
 
-export function reduceOutput(command, stdout, stderr, exitCode, { root = '', kind = null, successMarkers = [], resultMarkers = false } = {}) {
+function boundedPresentationLine(value, limit = 2000) {
+  const line = String(value || '');
+  if (line.length <= limit) return line;
+  const notice = ` … [${line.length} characters retained in raw evidence] … `;
+  const available = Math.max(0, limit - notice.length);
+  const left = Math.ceil(available / 2);
+  const right = Math.floor(available / 2);
+  return `${line.slice(0, left)}${notice}${right ? line.slice(-right) : ''}`;
+}
+
+export function reduceOutput(command, stdout, stderr, exitCode, { root = '', kind = null, successMarkers = [], resultMarkers = false, observedMarkers = null } = {}) {
   const text = normalizeTerminalText(`${stdout}\n${stderr}`, root);
+  const analysisText = text.split(/\r?\n/).map((line) => boundedPresentationLine(line, 8192)).join('\n');
   const summary = [];
   const commandText = String(command || '');
   const testCommand = kind === 'test' || /(?:^|[\s"])(?:ctest|npm(?:\.cmd)?\s+(?:run\s+)?(?:test|hud:test))/i.test(commandText);
   const auditCommand = kind === 'audit' || /npm(?:\.cmd)?\s+audit/i.test(commandText);
   const smokeCommand = kind === 'smoke' || /(?:smoke-test|desktop-smoke|room-smoke)/i.test(commandText);
-  const ctest = text.match(/(\d+)% tests passed(?:,\s*(\d+) tests failed)? out of (\d+)/i);
+  const ctest = analysisText.match(/(\d+)% tests passed(?:,\s*(\d+) tests failed)? out of (\d+)/i);
   if (ctest && testCommand) {
     const total = Number(ctest[3]);
     const failed = ctest[2] === undefined ? total - Math.round(total * Number(ctest[1]) / 100) : Number(ctest[2]);
     summary.push(`${total - failed}/${total} CTest`);
   }
-  const nodeTests = text.match(/(?:#|ℹ)\s*tests (\d+)[\s\S]*?(?:#|ℹ)\s*pass (\d+)[\s\S]*?(?:#|ℹ)\s*fail (\d+)/i);
+  const nodeTests = analysisText.match(/(?:#|ℹ)\s*tests (\d+)[\s\S]*?(?:#|ℹ)\s*pass (\d+)[\s\S]*?(?:#|ℹ)\s*fail (\d+)/i);
   if (nodeTests && testCommand) summary.push(`${nodeTests[2]}/${nodeTests[1]} node tests`);
-  const vitest = text.match(/Test Files\s+(\d+) passed[\s\S]*?Tests\s+(\d+) passed/i);
+  const vitest = analysisText.match(/Test Files\s+(\d+) passed[\s\S]*?Tests\s+(\d+) passed/i);
   if (vitest && testCommand) summary.push(`${vitest[1]} Vitest files, ${vitest[2]} tests`);
-  if (auditCommand && /found 0 vulnerabilities/i.test(text)) summary.push('audit 0 vulnerabilities');
-  if (smokeCommand && /SMOKE_TEST_OK/i.test(text)) summary.push('smoke test');
+  if (auditCommand && /found 0 vulnerabilities/i.test(analysisText)) summary.push('audit 0 vulnerabilities');
+  if (smokeCommand && /SMOKE_TEST_OK/i.test(analysisText)) summary.push('smoke test');
   if (exitCode === 0) {
-    for (const marker of successMarkers) if (text.includes(marker.contains) && !summary.includes(marker.summary)) summary.push(marker.summary);
+    for (const marker of successMarkers) if (analysisText.includes(marker.contains) && !summary.includes(marker.summary)) summary.push(marker.summary);
   }
-  const cause = exitCode === 0 ? null : firstMatch(text, [
+  const matchedCause = exitCode === 0 ? null : firstMatch(analysisText, [
     /[^\r\n]*(?:fatal|error|failed|exception|not found|is not recognized|cannot find)[^\r\n]*/i,
     /[^\r\n]*(?:FAIL|FAILED)[^\r\n]*/i,
   ]);
+  const cause = matchedCause ? boundedPresentationLine(matchedCause) : null;
   const classification = exitCode === 0 ? null
-    : /not found|not recognized|cannot find|ENOENT/i.test(cause || text) ? 'environment'
-      : /test|assert|expect/i.test(cause || text) ? 'test'
-        : /compile|link|cmake|msbuild/i.test(cause || text) ? 'build' : 'command';
-  const tail = text.split(/\r?\n/).filter(Boolean).slice(-8);
-  const markers = resultMarkers ? parseResultMarkers(stdout, stderr) : [];
+    : /not found|not recognized|cannot find|ENOENT/i.test(cause || analysisText) ? 'environment'
+      : /test|assert|expect/i.test(cause || analysisText) ? 'test'
+        : /compile|link|cmake|msbuild/i.test(cause || analysisText) ? 'build' : 'command';
+  const tail = text.split(/\r?\n/).filter(Boolean).slice(-8).map((line) => boundedPresentationLine(line));
+  const markers = resultMarkers ? (observedMarkers || parseResultMarkers(stdout, stderr)) : [];
   return { reducer: /npm/.test(command) ? 'npm' : /ctest/.test(command) ? 'ctest' : 'generic', summary, cause, classification, tail, markers };
 }
 
@@ -875,10 +1012,16 @@ export async function runCommand(project, tokens, {
   signal = null, onStart = null, onOutput = null, operationIdentity = null,
   cwd = project.root, displayCommand = null, reductionKind = null, successMarkers = [], resultMarkers = false,
   origin = 'core-api', classifyCapturedFailure = null,
+  captureOutput = 'bounded', captureLimitCharacters = 1024 * 1024,
+  outputObserver = null,
 } = {}) {
   if (!tokens.length) throw new Error('hud run requires a command.');
   const origins = new Set(['core-api', 'cli-argv', 'terminal-ui', 'local-server']);
   if (!origins.has(origin)) throw new Error(`Unsupported operation origin: ${origin}`);
+  if (!['bounded', 'full'].includes(captureOutput)) throw new Error(`Unsupported output capture mode: ${captureOutput}`);
+  if (!Number.isSafeInteger(captureLimitCharacters) || captureLimitCharacters < 1024) {
+    throw new Error('Output capture limit must be an integer of at least 1024 characters.');
+  }
   const transportCommand = tokens.map((token) => /[\s"']/.test(token) ? JSON.stringify(token) : token).join(' ');
   const command = displayCommand || transportCommand;
   const [before, currencyBefore, treeBefore] = await Promise.all([
@@ -892,8 +1035,30 @@ export async function runCommand(project, tokens, {
   const stderrPath = join(runDirectory, 'stderr.log');
   const stdoutFile = createWriteStream(stdoutPath, { flags: 'wx' });
   const stderrFile = createWriteStream(stderrPath, { flags: 'wx' });
-  let stdout = '';
-  let stderr = '';
+  const stdoutCapture = { chunks: [], characters: 0, truncated: false };
+  const stderrCapture = { chunks: [], characters: 0, truncated: false };
+  let stdoutBytes = 0;
+  let stderrBytes = 0;
+  const stdoutHash = createHash('sha256');
+  const stderrHash = createHash('sha256');
+  const markerCollector = createResultMarkerCollector(resultMarkers);
+  const capture = (state, value) => {
+    state.chunks.push(value);
+    state.characters += value.length;
+    if (captureOutput === 'full' || state.characters <= captureLimitCharacters) return;
+    state.truncated = true;
+    let excess = state.characters - captureLimitCharacters;
+    while (excess > 0 && state.chunks.length) {
+      if (state.chunks[0].length <= excess) {
+        excess -= state.chunks[0].length;
+        state.characters -= state.chunks.shift().length;
+      } else {
+        state.chunks[0] = state.chunks[0].slice(excess);
+        state.characters -= excess;
+        excess = 0;
+      }
+    }
+  };
   const started = new Date();
   let child;
   let cancellationRequested = false;
@@ -922,6 +1087,7 @@ export async function runCommand(project, tokens, {
       request: request || null, command, transportCommand, argv: tokens, cwd, objective: objective || null,
       startedAt: started.toISOString(), pid: child.pid, captureDelta, treeBefore,
       gitBefore: before, currencyBefore, stdoutPath, stderrPath, operationIdentity, resultMarkers,
+      captureOutput, captureLimitCharacters,
       provenance: { origin },
     }, { exclusive: true });
   } catch (error) {
@@ -941,12 +1107,42 @@ export async function runCommand(project, tokens, {
     else signal.addEventListener('abort', cancel, { once: true });
   }
   onStart?.({ runId: id, command, startedAt: started.toISOString(), stdoutPath, stderrPath, pid: child.pid });
-  child.stdout.on('data', (chunk) => { const value = chunk.toString(); stdout += value; stdoutFile.write(value); onOutput?.('stdout', value); if (stream) process.stdout.write(value); });
-  child.stderr.on('data', (chunk) => { const value = chunk.toString(); stderr += value; stderrFile.write(value); onOutput?.('stderr', value); if (stream) process.stderr.write(value); });
+  child.stdout.on('data', (chunk) => {
+    const value = chunk.toString();
+    stdoutBytes += chunk.length;
+    stdoutHash.update(chunk);
+    capture(stdoutCapture, value);
+    markerCollector.observe('stdout', value);
+    outputObserver?.observe?.('stdout', value);
+    if (!stdoutFile.write(chunk)) {
+      child.stdout.pause();
+      stdoutFile.once('drain', () => child.stdout.resume());
+    }
+    onOutput?.('stdout', value);
+    if (stream) process.stdout.write(chunk);
+  });
+  child.stderr.on('data', (chunk) => {
+    const value = chunk.toString();
+    stderrBytes += chunk.length;
+    stderrHash.update(chunk);
+    capture(stderrCapture, value);
+    markerCollector.observe('stderr', value);
+    outputObserver?.observe?.('stderr', value);
+    if (!stderrFile.write(chunk)) {
+      child.stderr.pause();
+      stderrFile.once('drain', () => child.stderr.resume());
+    }
+    onOutput?.('stderr', value);
+    if (stream) process.stderr.write(chunk);
+  });
   const exitCode = await new Promise((resolveCode) => {
     child.once('error', (error) => {
       const value = `${error.code || 'SPAWN'}: ${error.message}\n`;
-      stderr += value;
+      stderrBytes += Buffer.byteLength(value);
+      stderrHash.update(value);
+      capture(stderrCapture, value);
+      markerCollector.observe('stderr', value);
+      outputObserver?.observe?.('stderr', value);
       stderrFile.write(value);
     });
     child.once('close', (code) => resolveCode(code ?? 1));
@@ -954,11 +1150,17 @@ export async function runCommand(project, tokens, {
   if (forceTimer) clearTimeout(forceTimer);
   signal?.removeEventListener?.('abort', cancel);
   await Promise.all([new Promise((r) => stdoutFile.end(r)), new Promise((r) => stderrFile.end(r))]);
+  const stdout = stdoutCapture.chunks.join('');
+  const stderr = stderrCapture.chunks.join('');
   const ended = new Date();
   const [after, currencyAfter, treeAfter] = await Promise.all([
     gitSnapshot(project.root), repositoryCurrency(project.root, project.identity.id), captureDelta ? worktreeTree(project.root) : null,
   ]);
-  const reduction = reduceOutput(command, stdout, stderr, exitCode, { root: project.root, kind: reductionKind, successMarkers, resultMarkers });
+  const observedMarkers = markerCollector.finish();
+  const observedOutput = outputObserver?.finish?.() ?? null;
+  const reduction = reduceOutput(command, stdout, stderr, exitCode, {
+    root: project.root, kind: reductionKind, successMarkers, resultMarkers, observedMarkers,
+  });
   const capturedFailure = classifyCapturedFailure?.({ stdout, stderr, exitCode }) || null;
   if (capturedFailure) {
     reduction.cause ||= capturedFailure.message || 'The shell reported that the requested operation failed.';
@@ -984,6 +1186,15 @@ export async function runCommand(project, tokens, {
     changedFiles: after.changedFiles, gitBefore: before, gitAfter: after,
     currencyBefore, currencyAfter,
     stdoutPath, stderrPath, reducer: reduction.reducer, reduction,
+    evidence: {
+      stdout: { bytes: stdoutBytes, sha256: `sha256:${stdoutHash.digest('hex')}` },
+      stderr: { bytes: stderrBytes, sha256: `sha256:${stderrHash.digest('hex')}` },
+    },
+    capture: {
+      mode: captureOutput, limitCharacters: captureOutput === 'bounded' ? captureLimitCharacters : null,
+      stdoutBytes, stderrBytes, stdoutCharacters: stdout.length, stderrCharacters: stderr.length,
+      stdoutTruncated: stdoutCapture.truncated, stderrTruncated: stderrCapture.truncated,
+    },
     provenance: { origin, finalizedBy: 'process-exit' },
   };
   if (captureDelta) {
@@ -1000,7 +1211,7 @@ export async function runCommand(project, tokens, {
     };
   }
   if (operationReducer) {
-    record.operation = operationReducer({ stdout, stderr, exitCode, command, record });
+    record.operation = operationReducer({ stdout, stderr, exitCode, command, record, observedOutput });
     record.operation.provenance = record.provenance;
   }
   record.presentation = buildPresentation(record);
@@ -1032,6 +1243,27 @@ function interruptedJournalProblem(project, runDirectory, id, value) {
   return null;
 }
 
+function readEvidenceTail(path, limitBytes = 1024 * 1024) {
+  if (!existsSync(path)) return { text: '', bytes: 0, truncated: false };
+  const bytes = statSync(path).size;
+  const length = Math.min(bytes, limitBytes);
+  const buffer = Buffer.alloc(length);
+  const descriptor = openSync(path, 'r');
+  try { readSync(descriptor, buffer, 0, length, bytes - length); }
+  finally { closeSync(descriptor); }
+  return { text: buffer.toString('utf8'), bytes, truncated: bytes > length };
+}
+
+async function collectEvidenceMarkers(stdoutPath, stderrPath, enabled) {
+  const collector = createResultMarkerCollector(enabled);
+  if (!enabled) return [];
+  for (const [stream, path] of [['stdout', stdoutPath], ['stderr', stderrPath]]) {
+    if (!existsSync(path)) continue;
+    for await (const chunk of createReadStream(path)) collector.observe(stream, chunk.toString());
+  }
+  return collector.finish();
+}
+
 export async function recoverInterruptedRuns(project) {
   const runsRoot = join(project.store, 'runs', project.key);
   if (!existsSync(runsRoot)) return { recovered: [], detached: [], corrupt: [] };
@@ -1053,13 +1285,18 @@ export async function recoverInterruptedRuns(project) {
       detached.push({ runId: id, pid: inflight.pid, command: inflight.command, startedAt: inflight.startedAt });
       continue;
     }
-    const stdout = existsSync(inflight.stdoutPath) ? readFileSync(inflight.stdoutPath, 'utf8') : '';
-    const stderr = existsSync(inflight.stderrPath) ? readFileSync(inflight.stderrPath, 'utf8') : '';
+    const stdoutEvidence = readEvidenceTail(inflight.stdoutPath);
+    const stderrEvidence = readEvidenceTail(inflight.stderrPath);
+    const stdout = stdoutEvidence.text;
+    const stderr = stderrEvidence.text;
+    const observedMarkers = await collectEvidenceMarkers(inflight.stdoutPath, inflight.stderrPath, inflight.resultMarkers === true);
     const ended = new Date();
     const [after, currencyAfter, treeAfter] = await Promise.all([
       gitSnapshot(project.root), repositoryCurrency(project.root, project.identity.id), inflight.captureDelta ? worktreeTree(project.root) : null,
     ]);
-    const reduction = reduceOutput(inflight.command, stdout, stderr, 1, { root: project.root, resultMarkers: inflight.resultMarkers === true });
+    const reduction = reduceOutput(inflight.command, stdout, stderr, 1, {
+      root: project.root, resultMarkers: inflight.resultMarkers === true, observedMarkers,
+    });
     const record = {
       schemaVersion: SCHEMA_VERSION, id, project: project.identity.id, root: project.root,
       branch: inflight.gitBefore.branch, headBefore: inflight.gitBefore.head, headAfter: after.head, upstream: inflight.gitBefore.upstream,
@@ -1070,6 +1307,16 @@ export async function recoverInterruptedRuns(project) {
       dirtyBefore: inflight.gitBefore.dirty, dirtyAfter: after.dirty, changedFiles: after.changedFiles,
       gitBefore: inflight.gitBefore, gitAfter: after, currencyBefore: inflight.currencyBefore, currencyAfter,
       stdoutPath: inflight.stdoutPath, stderrPath: inflight.stderrPath, reducer: reduction.reducer, reduction,
+      evidence: {
+        stdout: { bytes: stdoutEvidence.bytes, sha256: existsSync(inflight.stdoutPath) ? fileSha256(inflight.stdoutPath) : null },
+        stderr: { bytes: stderrEvidence.bytes, sha256: existsSync(inflight.stderrPath) ? fileSha256(inflight.stderrPath) : null },
+      },
+      capture: {
+        mode: 'bounded-recovery', limitCharacters: null,
+        stdoutBytes: stdoutEvidence.bytes, stderrBytes: stderrEvidence.bytes,
+        stdoutCharacters: stdout.length, stderrCharacters: stderr.length,
+        stdoutTruncated: stdoutEvidence.truncated, stderrTruncated: stderrEvidence.truncated,
+      },
       provenance: { origin: inflight.provenance?.origin || 'legacy-unknown', finalizedBy: 'startup-recovery' },
     };
     if (inflight.captureDelta && inflight.treeBefore && treeAfter) {
@@ -1108,22 +1355,61 @@ export async function recoverInterruptedRuns(project) {
   return { recovered, detached, corrupt };
 }
 
-export function parseSearchOutput(stdout) {
+function createSearchOutputCollector({ maxLinesPerFile = 200, maxLineCharacters = 8192 } = {}) {
   const byPath = new Map();
-  for (const row of String(stdout || '').split(/\r?\n/)) {
-    if (!row) continue;
+  let remainder = '';
+  let discarding = false;
+  let matches = 0;
+  let detailsTruncated = false;
+  const consume = (row) => {
+    if (!row) return;
     const match = row.match(/^(.*?):(\d+):(.*)$/);
-    if (!match) continue;
+    if (!match) return;
     const path = match[1].replaceAll('\\', '/').replace(/^\.\//, '');
     const line = Number(match[2]);
-    if (!Number.isInteger(line)) continue;
-    if (!byPath.has(path)) byPath.set(path, { path, count: 0, lines: [] });
+    if (!Number.isInteger(line)) return;
+    if (!byPath.has(path)) byPath.set(path, { path, count: 0, lines: [], linesTruncated: false });
     const file = byPath.get(path);
+    matches++;
     file.count++;
-    file.lines.push(line);
-  }
-  const files = [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path, 'en'));
-  return { matches: files.reduce((sum, file) => sum + file.count, 0), files };
+    if (file.lines.length < maxLinesPerFile) file.lines.push(line);
+    else { file.linesTruncated = true; detailsTruncated = true; }
+  };
+  const observe = (stream, value) => {
+    if (stream !== 'stdout') return;
+    const text = String(value || '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+    let offset = 0;
+    while (offset < text.length) {
+      const newline = text.indexOf('\n', offset);
+      if (newline < 0) {
+        const part = text.slice(offset);
+        if (!discarding) {
+          if (remainder.length + part.length <= maxLineCharacters) remainder += part;
+          else { remainder += part.slice(0, Math.max(0, maxLineCharacters - remainder.length)); discarding = true; }
+        }
+        break;
+      }
+      const part = text.slice(offset, newline);
+      if (!discarding) consume(`${remainder}${part}`);
+      else { consume(remainder); detailsTruncated = true; }
+      remainder = '';
+      discarding = false;
+      offset = newline + 1;
+    }
+  };
+  const finish = () => {
+    if (remainder) consume(remainder);
+    const files = [...byPath.values()].sort((a, b) => a.path.localeCompare(b.path, 'en'));
+    return { matches, fileCount: files.length, files, detailsTruncated };
+  };
+  return { observe, finish };
+}
+
+export function parseSearchOutput(stdout) {
+  const collector = createSearchOutputCollector();
+  collector.observe('stdout', stdout);
+  const result = collector.finish();
+  return { matches: result.matches, files: result.files.map(({ linesTruncated, ...file }) => file) };
 }
 
 function repositoryScope(root, requested = '.') {
@@ -1141,7 +1427,8 @@ export async function searchRepository(project, query, scope = '.', { stream = f
   if (!String(query || '')) throw new Error('hud search requires a query.');
   const selectedScope = repositoryScope(project.root, scope);
   const availability = await exec(tool, ['--version'], project.root);
-  const tokens = [tool, '-n', '--no-heading', '--color', 'never', '--fixed-strings', '--', String(query), selectedScope];
+  const tokens = [tool, '-n', '--no-heading', '--with-filename', '--color', 'never', '--fixed-strings', '--', String(query), selectedScope];
+  const searchCollector = createSearchOutputCollector();
   return runCommand(project, tokens, {
     request: `search ${query} in ${selectedScope}`,
     objective: `Find ${query} in ${selectedScope}`,
@@ -1149,12 +1436,15 @@ export async function searchRepository(project, query, scope = '.', { stream = f
     shell: false,
     origin,
     acceptedExitCodes: [0, 1],
-    operationReducer: ({ stdout, exitCode, command }) => {
-      const result = exitCode <= 1 ? parseSearchOutput(stdout) : { matches: 0, files: [] };
+    outputObserver: searchCollector,
+    operationReducer: ({ exitCode, command, observedOutput }) => {
+      const result = exitCode <= 1 ? observedOutput : { matches: 0, fileCount: 0, files: [], detailsTruncated: false };
       return {
         type: 'search', query: String(query), scope: selectedScope,
         tool, toolAvailable: availability.ok, command, exitCode,
-        matchCount: result.matches, fileCount: result.files.length, files: result.files,
+        matchCount: result.matches, fileCount: result.fileCount,
+        files: result.files.map(({ linesTruncated, ...file }) => linesTruncated ? { ...file, linesTruncated: true } : file),
+        detailsTruncated: result.detailsTruncated,
       };
     },
   });
@@ -1193,6 +1483,10 @@ export async function runRepositoryCommand(project, name, { stream = false, sign
       status: record.status, durationMs: record.durationMs,
       summary: [...record.reduction.summary],
       markers: [...record.reduction.markers],
+      stageModel: selected.stageMarker ? {
+        marker: selected.stageMarker,
+        stages: selected.stages.map((stage) => ({ name: stage.name, paths: [...stage.paths] })),
+      } : null,
     }),
   });
 }
@@ -1202,19 +1496,21 @@ export async function lintRepository(project, { stream = false, signal = null, o
   const selected = commands.find((command) => command.name === 'lint') || commands.find((command) => command.name === 'npm:lint');
   if (!selected) throw new Error('This repository does not declare a lint command.');
   const argv = repositoryCommandArgv(selected);
+  const lintCollector = createLintOutputCollector(project.root);
   return runCommand(project, argv, {
     request: 'lint repository', objective: `Lint with ${selected.command}`,
     stream, origin, shell: false, captureDelta: true, reductionKind: 'lint',
     successMarkers: selected.successMarkers, resultMarkers: selected.resultMarkers,
+    outputObserver: lintCollector,
     signal, onStart, onOutput,
     operationIdentity: { type: 'lint', authority: selected.name, displayCommand: selected.command },
-    operationReducer: ({ stdout, stderr, exitCode, command, record }) => {
-      const diagnostics = parseLintDiagnostics(stdout, stderr, project.root);
-      const files = [...new Set(diagnostics.map((diagnostic) => diagnostic.path))].sort((a, b) => a.localeCompare(b, 'en'));
+    operationReducer: ({ exitCode, command, record, observedOutput }) => {
       return {
         type: 'lint', authority: selected.name, displayCommand: selected.command, command, exitCode,
         status: record.status, durationMs: record.durationMs,
-        diagnosticCount: diagnostics.length, fileCount: files.length, files, diagnostics,
+        diagnosticCount: observedOutput.diagnosticCount, fileCount: observedOutput.fileCount,
+        files: observedOutput.files, diagnostics: observedOutput.diagnostics,
+        detailsTruncated: observedOutput.detailsTruncated,
         summary: [...record.reduction.summary], markers: [...record.reduction.markers],
       };
     },
@@ -1365,6 +1661,13 @@ function compactContextEvidence(value, { maxLines = 40, maxChars = 6000 } = {}) 
   return { text, omitted };
 }
 
+function compactContextEvidenceFile(path, options = {}) {
+  if (!path || !existsSync(path)) return { text: '', omitted: false };
+  const evidence = readEvidenceTail(path, 64 * 1024);
+  const compact = compactContextEvidence(evidence.text, options);
+  return { ...compact, omitted: compact.omitted || evidence.truncated };
+}
+
 function evidenceSize(path) {
   try { return path && existsSync(path) ? statSync(path).size : 0; } catch { return 0; }
 }
@@ -1393,6 +1696,7 @@ export function buildOperationContext(project, record, { currentCurrency = null 
     lines.push(`QUERY ${operation.query}`);
     lines.push(`COMMAND ${operation.command}`);
     lines.push(`RESULT ${operation.matchCount} matches / ${operation.fileCount} files`);
+    if (operation.detailsTruncated) lines.push('DETAILS BOUNDED · inspect raw evidence for omitted match lines');
     lines.push('', 'FILES');
     for (const file of operation.files) lines.push(`${file.path} ${file.count} lines=${file.lines.join(',')}`);
   } else if (operation.type === 'repository-command') {
@@ -1421,8 +1725,9 @@ export function buildOperationContext(project, record, { currentCurrency = null 
       for (const diagnostic of operation.diagnostics.slice(0, 100)) {
         lines.push(`${diagnostic.path}:${diagnostic.line}:${diagnostic.column} ${diagnostic.severity}${diagnostic.code ? ` ${diagnostic.code}` : ''} ${diagnostic.message}`);
       }
-      if (operation.diagnostics.length > 100) lines.push(`... ${operation.diagnostics.length - 100} additional diagnostics retained in raw evidence`);
+      if (operation.diagnosticCount > 100) lines.push(`... ${operation.diagnosticCount - 100} additional diagnostics in raw evidence`);
     }
+    if (operation.detailsTruncated) lines.push('DETAILS BOUNDED · inspect raw evidence for omitted diagnostics');
   } else if (operation.type === 'terminal-command') {
     lines.push(`SHELL ${operation.shellLabel || operation.shell}`);
     lines.push(`COMMAND ${operation.displayCommand || operation.command}`);
@@ -1432,8 +1737,8 @@ export function buildOperationContext(project, record, { currentCurrency = null 
     if (operation.status !== 'interrupted' && operation.summary?.length) lines.push(`SUMMARY ${operation.summary.join('; ')}`);
     if (operation.cwdPersistence === 'outside-repository') lines.push('CWD_RESULT NOT_ADOPTED outside-repository');
     if (record.delta?.paths?.length) lines.push('', 'CHANGED_FILES', ...record.delta.paths);
-    const stdout = compactContextEvidence(record.stdoutPath && existsSync(record.stdoutPath) ? readFileSync(record.stdoutPath, 'utf8') : '', { maxLines: operation.summary?.length ? 12 : 40, maxChars: 6000 });
-    const stderr = compactContextEvidence(record.stderrPath && existsSync(record.stderrPath) ? readFileSync(record.stderrPath, 'utf8') : '');
+    const stdout = compactContextEvidenceFile(record.stdoutPath, { maxLines: operation.summary?.length ? 12 : 40, maxChars: 6000 });
+    const stderr = compactContextEvidenceFile(record.stderrPath);
     if (stdout.text) lines.push('', `STDOUT_EXCERPT${stdout.omitted ? ' (tail, bounded)' : ''}`, stdout.text);
     if (stderr.text) lines.push('', `STDERR_EXCERPT${stderr.omitted ? ' (tail, bounded)' : ''}`, stderr.text);
   } else if (operation.type === 'undo') {
@@ -1693,7 +1998,22 @@ export function listRuns(project, limit = 10) {
   return ids.slice(0, limit).map((id) => readJson(join(root, id, 'run.json'))).filter(Boolean);
 }
 
-function proofFromRecord(command, state, reusable, record, currentCurrency, classification, reason) {
+export function classifyRunEvidenceIntegrity(project, record) {
+  if (!record?.id) return 'MISSING';
+  const runDirectory = join(project.store, 'runs', project.key, record.id);
+  for (const stream of ['stdout', 'stderr']) {
+    const expectedPath = join(runDirectory, `${stream}.log`);
+    if (resolve(record[`${stream}Path`] || '') !== resolve(expectedPath) || !existsSync(expectedPath)) return 'MISSING';
+  }
+  if (!record.evidence?.stdout?.sha256 || !record.evidence?.stderr?.sha256) return 'UNKNOWN';
+  for (const stream of ['stdout', 'stderr']) {
+    const path = join(runDirectory, `${stream}.log`);
+    if (statSync(path).size !== record.evidence[stream].bytes || fileSha256(path) !== record.evidence[stream].sha256) return 'CORRUPT';
+  }
+  return 'VERIFIED';
+}
+
+function proofFromRecord(command, state, reusable, record, currentCurrency, classification, reason, integrity = record ? 'UNKNOWN' : 'MISSING') {
   const recorded = record?.currencyAfter || null;
   return {
     command,
@@ -1701,6 +2021,7 @@ function proofFromRecord(command, state, reusable, record, currentCurrency, clas
     reusable,
     runId: record?.id || null,
     recordedStatus: record?.status || null,
+    integrity,
     reason: reason || null,
     currency: {
       recordedHead: recorded?.head || null,
@@ -1731,11 +2052,14 @@ export async function repositoryCommandProof(project, name) {
     newestMatching ||= record;
     const proofCurrency = classification(record);
     if (proofCurrency === 'CURRENT') {
+      const integrity = classifyRunEvidenceIntegrity(project, record);
       const completePass = record.status === 'pass' && record.operation.status === 'pass' &&
-        existsSync(record.stdoutPath || '') && existsSync(record.stderrPath || '');
-      if (completePass) return proofFromRecord(command, 'CURRENT', true, record, currentCurrency, 'CURRENT', null);
+        integrity !== 'MISSING' && integrity !== 'CORRUPT';
+      if (completePass) return proofFromRecord(command, 'CURRENT', true, record, currentCurrency, 'CURRENT', null, integrity);
       return proofFromRecord(command, 'MISSING', false, record, currentCurrency, 'CURRENT',
-        `The newest retained attempt for current bytes is ${record.status || 'invalid'}.`);
+        integrity === 'CORRUPT' ? 'Retained raw evidence failed its recorded integrity check.'
+          : integrity === 'MISSING' ? 'Retained raw evidence is incomplete.'
+            : `The newest retained attempt for current bytes is ${record.status || 'invalid'}.`, integrity);
     }
     if (!newestSuccessful && record.status === 'pass' && record.operation.status === 'pass') newestSuccessful = record;
   }
@@ -1752,12 +2076,136 @@ export function formatRepositoryCommandProof(proof) {
   const lines = [`PROOF ${proof.state}`, `COMMAND ${proof.command}`];
   if (proof.recordedStatus) lines.push(`STATUS ${proof.recordedStatus.toUpperCase()}`);
   if (proof.runId) lines.push(`RUN ${proof.runId}`);
+  lines.push(`INTEGRITY ${proof.integrity}`);
   if (proof.state === 'CURRENT') lines.push('EVIDENCE WORKTREE MATCH');
   if (proof.reason) lines.push(`REASON ${proof.reason}`);
   if (proof.currency.recordedHead) lines.push(`RECORDED_HEAD ${proof.currency.recordedHead.slice(0, 7)}`);
   lines.push(`CURRENT_HEAD ${proof.currency.currentHead.slice(0, 7)}`);
   lines.push(`HEAD_CHANGED ${proof.currency.headChanged}`);
   if (proof.runId) lines.push(`RAW run:${proof.runId}`);
+  return lines.join('\n');
+}
+
+async function changedPathsSinceTree(root, recordedTree) {
+  if (!/^[0-9a-f]{40}$/i.test(recordedTree || '')) {
+    return { classification: 'UNKNOWN', paths: null, reason: 'Retained evidence has no valid worktree tree.' };
+  }
+  const exists = await exec('git', ['cat-file', '-e', `${recordedTree}^{tree}`], root);
+  if (!exists.ok) return { classification: 'UNKNOWN', paths: null, reason: 'Retained worktree tree is unavailable in this repository.' };
+  const [tracked, untracked] = await Promise.all([
+    exec('git', ['diff', '--name-only', '-z', recordedTree, '--'], root, { trim: false }),
+    exec('git', ['ls-files', '-z', '--others', '--exclude-standard'], root, { trim: false }),
+  ]);
+  if (!tracked.ok || !untracked.ok) {
+    return { classification: 'UNKNOWN', paths: null, reason: `Unable to compare retained worktree evidence: ${tracked.stderr || untracked.stderr}` };
+  }
+  const paths = [...new Set(`${tracked.stdout}${untracked.stdout}`.split('\0').filter(Boolean).map((path) => path.replaceAll('\\', '/')))].sort((a, b) => a.localeCompare(b));
+  return { classification: paths.length ? 'STALE' : 'CURRENT', paths, reason: null };
+}
+
+function stagePathAffected(path, scopes) {
+  return scopes.some((scope) => scope === '.' || path === scope || path.startsWith(`${scope}/`));
+}
+
+export async function repositoryCommandImpact(project, name) {
+  const command = String(name || '');
+  const selected = repositoryCommandDefinitions(project.root).find((entry) => entry.name === command);
+  if (!selected) throw new Error(`Unknown repository command: ${command}`);
+  const currentCurrency = await repositoryCurrency(project.root, project.identity.id);
+  const { root, ids } = runIdsNewest(project);
+  let record = null;
+  for (const id of ids) {
+    const candidate = readJson(join(root, id, 'run.json'));
+    if (candidate?.operation?.type === 'repository-command' && candidate.operation.name === command && candidate.status === 'pass' && candidate.operation.status === 'pass') {
+      record = candidate;
+      break;
+    }
+  }
+  if (!record) {
+    return {
+      command, state: 'MISSING', runId: null, recordedStatus: null,
+      integrity: 'MISSING',
+      changedPaths: null, changeCount: null, stages: [],
+      reason: 'No successful retained attempt exists for this command.',
+      currency: { recordedHead: null, currentHead: currentCurrency.head, recordedFingerprint: null, currentFingerprint: currentCurrency.worktreeFingerprint, headChanged: false, classification: 'UNKNOWN' },
+      raw: { stdout: null, stderr: null }, durationMs: null,
+    };
+  }
+  const integrity = classifyRunEvidenceIntegrity(project, record);
+  const rawComplete = integrity !== 'MISSING' && integrity !== 'CORRUPT';
+  const currencyClassification = classifyProofCurrency(record.currencyAfter, currentCurrency);
+  let delta = currencyClassification === 'CURRENT'
+    ? { classification: 'CURRENT', paths: [], reason: null }
+    : await changedPathsSinceTree(project.root, record.delta?.treeAfter);
+  if (currencyClassification === 'UNKNOWN') delta = { classification: 'UNKNOWN', paths: null, reason: 'Retained proof currency is incomplete.' };
+
+  const recordedStageModel = record.operation.stageModel || null;
+  const currentStageModel = selected.stageMarker ? { marker: selected.stageMarker, stages: selected.stages } : null;
+  const stageModelChanged = JSON.stringify(recordedStageModel) !== JSON.stringify(currentStageModel);
+  const observedStageMarker = recordedStageModel?.marker || currentStageModel?.marker || null;
+  const markerCandidates = (record.operation.markers || record.reduction?.markers || []).filter((marker) =>
+    marker?.fields?.name && (observedStageMarker ? marker.event === observedStageMarker : /_STAGE$/.test(marker.event || '')));
+  const observed = new Map();
+  for (const marker of markerCandidates) observed.set(marker.fields.name, marker);
+  const retainedStages = recordedStageModel?.stages || [];
+  const declared = new Map(retainedStages.map((stage) => [stage.name, stage]));
+  const stageNames = [...new Set([...retainedStages.map((stage) => stage.name), ...observed.keys()])];
+  const stages = stageNames.map((stageName) => {
+    const marker = observed.get(stageName) || null;
+    const declaration = declared.get(stageName) || null;
+    let state = 'UNKNOWN';
+    let reason = null;
+    let changedPaths = null;
+    if (!marker) reason = 'No retained stage result marker exists.';
+    else if (marker.status !== 'PASS') { state = 'STALE'; reason = `Retained stage status is ${marker.status}.`; }
+    else if (!rawComplete) reason = 'Retained raw evidence is incomplete.';
+    else if (currencyClassification === 'CURRENT') { state = 'CURRENT'; changedPaths = []; }
+    else if (stageModelChanged) reason = recordedStageModel
+      ? 'Repository stage dependency declaration differs from the retained run.'
+      : 'Retained run has no stage dependency declaration.';
+    else if (delta.classification === 'UNKNOWN') reason = delta.reason;
+    else if (!declaration) reason = 'Repository does not declare this stage dependency scope.';
+    else {
+      changedPaths = delta.paths.filter((path) => stagePathAffected(path, declaration.paths));
+      state = changedPaths.length ? 'STALE' : 'CURRENT';
+      reason = changedPaths.length ? 'A changed path is inside the declared stage scope.' : null;
+    }
+    return {
+      name: stageName, recordedStatus: marker?.status || null, state,
+      paths: declaration?.paths || null, changedPaths,
+      marker: marker ? { event: marker.event, stream: marker.stream, line: marker.line, fields: marker.fields } : null,
+      reason,
+    };
+  });
+  const state = !rawComplete ? 'MISSING' : currencyClassification === 'CURRENT' ? 'CURRENT' : delta.classification;
+  return {
+    command, state, runId: record.id, recordedStatus: record.status,
+    changedPaths: delta.paths, changeCount: delta.paths?.length ?? null, stages,
+    reason: integrity === 'CORRUPT' ? 'Retained raw evidence failed its recorded integrity check.'
+      : !rawComplete ? 'Retained raw evidence is incomplete.' : delta.reason,
+    integrity,
+    currency: {
+      recordedHead: record.currencyAfter?.head || null, currentHead: currentCurrency.head,
+      recordedFingerprint: record.currencyAfter?.worktreeFingerprint || null, currentFingerprint: currentCurrency.worktreeFingerprint,
+      headChanged: Boolean(record.currencyAfter?.head && record.currencyAfter.head !== currentCurrency.head),
+      classification: currencyClassification,
+    },
+    raw: { stdout: record.stdoutPath, stderr: record.stderrPath },
+    durationMs: record.durationMs ?? null,
+  };
+}
+
+export function formatRepositoryCommandImpact(impact) {
+  const lines = [`IMPACT ${impact.command}`, `RUN ${impact.runId || 'none'}`, `INTEGRITY ${impact.integrity || 'UNKNOWN'}`, `EVIDENCE ${impact.state}`, `CHANGED ${impact.changeCount ?? 'UNKNOWN'}`];
+  if (impact.changedPaths?.length) lines.push('FILES', ...impact.changedPaths);
+  lines.push('STAGES');
+  if (!impact.stages.length) lines.push('(none observed)');
+  for (const stage of impact.stages) {
+    lines.push(`${stage.name} ${stage.recordedStatus || 'UNKNOWN'} ${stage.state}`);
+    if (stage.reason) lines.push(`  REASON ${stage.reason}`);
+  }
+  if (impact.reason) lines.push(`REASON ${impact.reason}`);
+  if (impact.runId) lines.push(`RAW run:${impact.runId}`);
   return lines.join('\n');
 }
 
@@ -1851,7 +2299,127 @@ function boundedEvidenceNumber(value, fallback, name) {
   return number;
 }
 
-export function projectRunEvidence(project, id, { mode = 'raw', count, pattern, context } = {}) {
+function scanEvidenceLines(path, onLine, { needle = null, maxLineCharacters = 8192 } = {}) {
+  const descriptor = openSync(path, 'r');
+  const decoder = new StringDecoder('utf8');
+  const buffer = Buffer.alloc(64 * 1024);
+  let index = 0;
+  let lineLength = 0;
+  let lineBuffer = '';
+  let prefix = '';
+  let suffix = '';
+  let needleWindow = '';
+  let needleFound = false;
+  let pendingCarriageReturn = false;
+  const sideLimit = Math.floor(maxLineCharacters / 2);
+  const append = (part) => {
+    if (!part) return;
+    lineLength += part.length;
+    if (lineBuffer !== null) {
+      const combined = `${lineBuffer}${part}`;
+      if (combined.length <= maxLineCharacters) lineBuffer = combined;
+      else {
+        prefix = combined.slice(0, sideLimit);
+        suffix = combined.slice(-sideLimit);
+        lineBuffer = null;
+      }
+    } else suffix = part.length >= sideLimit ? part.slice(-sideLimit) : `${suffix}${part}`.slice(-sideLimit);
+    if (needle && !needleFound) {
+      const candidate = `${needleWindow}${part}`;
+      needleFound = candidate.includes(needle);
+      needleWindow = candidate.slice(-Math.max(0, needle.length - 1));
+    }
+  };
+  const finishLine = () => {
+    let text = lineBuffer;
+    if (lineBuffer === null) {
+      const notice = ` … [${lineLength} characters retained in raw evidence] … `;
+      const available = Math.max(0, maxLineCharacters - notice.length);
+      const left = Math.ceil(available / 2);
+      const right = Math.floor(available / 2);
+      text = `${prefix.slice(0, left)}${notice}${right ? suffix.slice(-right) : ''}`;
+    }
+    onLine(text, index++, needleFound, lineLength > maxLineCharacters);
+    lineLength = 0; lineBuffer = ''; prefix = ''; suffix = ''; needleWindow = ''; needleFound = false;
+  };
+  const consume = (value) => {
+    let offset = 0;
+    if (pendingCarriageReturn) {
+      if (value.startsWith('\n')) offset = 1;
+      pendingCarriageReturn = false;
+    }
+    const newline = /[\r\n]/g;
+    newline.lastIndex = offset;
+    let match;
+    while ((match = newline.exec(value))) {
+      append(value.slice(offset, match.index));
+      finishLine();
+      if (match[0] === '\r') {
+        if (value[match.index + 1] === '\n') newline.lastIndex++;
+        else if (match.index === value.length - 1) pendingCarriageReturn = true;
+      }
+      offset = newline.lastIndex;
+    }
+    append(value.slice(offset));
+  };
+  try {
+    while (true) {
+      const bytes = readSync(descriptor, buffer, 0, buffer.length, null);
+      if (!bytes) break;
+      consume(decoder.write(buffer.subarray(0, bytes)));
+    }
+    consume(decoder.end());
+    if (lineLength > 0) finishLine();
+  } finally { closeSync(descriptor); }
+  return index;
+}
+
+function projectEvidenceLines(path, mode, { lineCount, needle, contextCount }) {
+  const retained = [];
+  const tail = [];
+  const previous = [];
+  const selected = new Map();
+  let matchCount = 0;
+  let futureContext = 0;
+  let selectionTruncated = false;
+  const retainSelected = (index, text) => {
+    if (selected.has(index)) return;
+    if (selected.size >= 500) { selectionTruncated = true; return; }
+    selected.set(index, text);
+  };
+  const totalLines = scanEvidenceLines(path, (text, index, needleFound) => {
+    if (mode === 'head' && retained.length < lineCount) retained.push({ number: index + 1, text });
+    if (mode === 'tail') {
+      tail.push({ number: index + 1, text });
+      if (tail.length > lineCount) tail.shift();
+    }
+    if (mode === 'find' || mode === 'around') {
+      const matches = needleFound;
+      if (matches) {
+        matchCount++;
+        if (mode === 'find') retainSelected(index, text);
+        else {
+          for (const prior of previous) retainSelected(prior.index, prior.text);
+          retainSelected(index, text);
+          futureContext = contextCount;
+        }
+      } else if (mode === 'around' && futureContext > 0) {
+        retainSelected(index, text);
+        futureContext--;
+      }
+      if (mode === 'around') {
+        previous.push({ index, text });
+        if (previous.length > contextCount) previous.shift();
+      }
+    }
+  }, { needle: mode === 'find' || mode === 'around' ? needle : null });
+  if (mode === 'head') return { totalLines, lines: retained };
+  if (mode === 'tail') return { totalLines, lines: tail };
+  const lines = [...selected.entries()].sort((a, b) => a[0] - b[0]).map(([index, text]) => ({ number: index + 1, text }));
+  return { totalLines, matchCount, truncated: selectionTruncated, lines };
+}
+
+function validatedRunEvidence(project, id) {
   const record = runById(project, id);
   if (!record) throw new Error(`No recorded run found for ${id}.`);
   const runDirectory = join(project.store, 'runs', project.key, record.id);
@@ -1865,6 +2433,11 @@ export function projectRunEvidence(project, id, { mode = 'raw', count, pattern, 
     }
     if (!existsSync(expected[stream])) throw new Error(`Recorded ${stream} evidence is missing for ${record.id}.`);
   }
+  return { record, expected };
+}
+
+export function projectRunEvidence(project, id, { mode = 'raw', count, pattern, context } = {}) {
+  const { record, expected } = validatedRunEvidence(project, id);
   if (!['raw', 'head', 'tail', 'find', 'around'].includes(mode)) throw new Error(`Unknown evidence projection: ${mode}.`);
   const needle = pattern === undefined ? null : String(pattern);
   if ((mode === 'find' || mode === 'around') && !needle) throw new Error(`hud ${mode} requires a non-empty pattern.`);
@@ -1872,34 +2445,11 @@ export function projectRunEvidence(project, id, { mode = 'raw', count, pattern, 
   const contextCount = mode === 'around' ? boundedEvidenceNumber(context, 2, mode) : null;
 
   const streams = ['stdout', 'stderr'].map((stream) => {
-    const content = readFileSync(expected[stream], 'utf8');
-    const all = evidenceLines(content);
-    if (mode === 'raw') return { stream, totalLines: all.length, content };
-    let indexes;
-    if (mode === 'head') indexes = all.slice(0, lineCount).map((_, index) => index);
-    else if (mode === 'tail') indexes = all.slice(Math.max(0, all.length - lineCount)).map((_, index) => Math.max(0, all.length - lineCount) + index);
-    else {
-      const matches = all.flatMap((line, index) => line.includes(needle) ? [index] : []);
-      if (mode === 'find') indexes = matches;
-      else {
-        const selected = new Set();
-        for (const index of matches) {
-          const first = Math.max(0, index - contextCount);
-          const last = Math.min(all.length - 1, index + contextCount);
-          for (let selectedIndex = first; selectedIndex <= last; selectedIndex++) selected.add(selectedIndex);
-        }
-        indexes = [...selected].sort((a, b) => a - b);
-      }
-      const boundedIndexes = indexes.slice(0, 500);
-      return {
-        stream,
-        totalLines: all.length,
-        matchCount: matches.length,
-        truncated: boundedIndexes.length < indexes.length,
-        lines: boundedIndexes.map((index) => ({ number: index + 1, text: all[index] })),
-      };
+    if (mode === 'raw') {
+      const content = readFileSync(expected[stream], 'utf8');
+      return { stream, totalLines: evidenceLines(content).length, content };
     }
-    return { stream, totalLines: all.length, lines: indexes.map((index) => ({ number: index + 1, text: all[index] })) };
+    return { stream, ...projectEvidenceLines(expected[stream], mode, { lineCount, needle, contextCount }) };
   });
   return {
     runId: record.id,
@@ -1914,9 +2464,99 @@ export function projectRunEvidence(project, id, { mode = 'raw', count, pattern, 
   };
 }
 
+async function streamBoundedDiff(leftPath, rightPath, cwd, stream, leftId, rightId, { maxLines, maxChars }) {
+  const leftIdentity = filesystemIdentity(leftPath);
+  const rightIdentity = filesystemIdentity(rightPath);
+  if (leftIdentity.sha256 === rightIdentity.sha256) return { different: false, totalLines: 0, truncated: false, text: '' };
+  if (Math.max(leftIdentity.size, rightIdentity.size) > 8 * 1024 * 1024) {
+    const lines = [
+      `LARGE_EVIDENCE_DIFF ${stream}`,
+      `LEFT run:${leftId} bytes=${leftIdentity.size} ${leftIdentity.sha256}`,
+      `RIGHT run:${rightId} bytes=${rightIdentity.size} ${rightIdentity.sha256}`,
+      'TEXT_PATCH BOUNDED · inspect retained evidence projections for content',
+    ];
+    return { different: true, totalLines: lines.length, truncated: true, text: lines.join('\n') };
+  }
+  const child = spawn('git', ['diff', '--no-index', '--no-ext-diff', '--unified=3', '--', leftPath, rightPath], {
+    cwd, shell: false, windowsHide: true, env: process.env,
+  });
+  const lines = [];
+  let characters = 0;
+  let totalLines = 0;
+  let truncated = false;
+  let stderr = '';
+  const normalize = (line) => {
+    if (line.startsWith('diff --git ')) return `diff --git a/${stream}:${leftId} b/${stream}:${rightId}`;
+    if (line.startsWith('--- ')) return `--- ${stream}:${leftId}`;
+    if (line.startsWith('+++ ')) return `+++ ${stream}:${rightId}`;
+    return line;
+  };
+  let lineLength = 0;
+  let lineBuffer = '';
+  let prefix = '';
+  let suffix = '';
+  let pendingCarriageReturn = false;
+  const sideLimit = 4096;
+  const append = (part) => {
+    if (!part) return;
+    lineLength += part.length;
+    if (lineBuffer !== null) {
+      const combined = `${lineBuffer}${part}`;
+      if (combined.length <= 8192) lineBuffer = combined;
+      else { prefix = combined.slice(0, sideLimit); suffix = combined.slice(-sideLimit); lineBuffer = null; }
+    } else suffix = part.length >= sideLimit ? part.slice(-sideLimit) : `${suffix}${part}`.slice(-sideLimit);
+  };
+  const finishLine = () => {
+    let line = lineBuffer;
+    if (lineBuffer === null) {
+      const notice = ` … [${lineLength} characters retained in raw evidence] … `;
+      const available = Math.max(0, 8192 - notice.length);
+      const left = Math.ceil(available / 2);
+      const right = Math.floor(available / 2);
+      line = `${prefix.slice(0, left)}${notice}${right ? suffix.slice(-right) : ''}`;
+    }
+    line = normalize(line);
+    totalLines++;
+    if (lines.length < maxLines && characters + line.length + (lines.length ? 1 : 0) <= maxChars) {
+      lines.push(line);
+      characters += line.length + (lines.length > 1 ? 1 : 0);
+    } else truncated = true;
+    lineLength = 0; lineBuffer = ''; prefix = ''; suffix = '';
+  };
+  const observe = (value) => {
+    let offset = 0;
+    if (pendingCarriageReturn) {
+      if (value.startsWith('\n')) offset = 1;
+      pendingCarriageReturn = false;
+    }
+    const newline = /[\r\n]/g;
+    newline.lastIndex = offset;
+    let match;
+    while ((match = newline.exec(value))) {
+      append(value.slice(offset, match.index));
+      finishLine();
+      if (match[0] === '\r') {
+        if (value[match.index + 1] === '\n') newline.lastIndex++;
+        else if (match.index === value.length - 1) pendingCarriageReturn = true;
+      }
+      offset = newline.lastIndex;
+    }
+    append(value.slice(offset));
+  };
+  child.stdout.on('data', (chunk) => observe(chunk.toString()));
+  child.stderr.on('data', (chunk) => { stderr = `${stderr}${chunk.toString()}`.slice(-64 * 1024); });
+  const code = await new Promise((resolveCode, reject) => {
+    child.once('error', reject);
+    child.once('close', (value) => resolveCode(value ?? 2));
+  });
+  if (lineLength > 0) finishLine();
+  if (code > 1) throw new Error(`Unable to compare recorded ${stream}: ${stderr.trim()}`);
+  return { different: code === 1, totalLines, truncated, text: lines.join('\n') };
+}
+
 export async function diffRunEvidence(project, leftId, rightId, { maxLines = 500, maxChars = 64 * 1024 } = {}) {
-  projectRunEvidence(project, leftId);
-  projectRunEvidence(project, rightId);
+  validatedRunEvidence(project, leftId);
+  validatedRunEvidence(project, rightId);
   const boundedLines = boundedEvidenceNumber(maxLines, 500, 'diff');
   if (!Number.isInteger(maxChars) || maxChars < 1024 || maxChars > 1024 * 1024) throw new Error('hud diff requires a character bound from 1024 to 1048576.');
   const runRoot = join(project.store, 'runs', project.key);
@@ -1924,20 +2564,7 @@ export async function diffRunEvidence(project, leftId, rightId, { maxLines = 500
   for (const stream of ['stdout', 'stderr']) {
     const leftPath = join(runRoot, leftId, `${stream}.log`);
     const rightPath = join(runRoot, rightId, `${stream}.log`);
-    const result = await exec('git', ['diff', '--no-index', '--no-ext-diff', '--unified=3', '--', leftPath, rightPath], project.root, { trim: false });
-    if (result.code > 1) throw new Error(`Unable to compare recorded ${stream}: ${result.stderr}`);
-    const normalized = result.stdout.split(/\r?\n/).map((line) => {
-      if (line.startsWith('diff --git ')) return `diff --git a/${stream}:${leftId} b/${stream}:${rightId}`;
-      if (line.startsWith('--- ')) return `--- ${stream}:${leftId}`;
-      if (line.startsWith('+++ ')) return `+++ ${stream}:${rightId}`;
-      return line;
-    }).join('\n');
-    const lines = evidenceLines(normalized);
-    let selected = lines.slice(0, boundedLines);
-    let text = selected.join('\n');
-    let truncated = selected.length < lines.length;
-    if (text.length > maxChars) { text = text.slice(0, maxChars); truncated = true; }
-    streams.push({ stream, different: result.code === 1, totalLines: lines.length, truncated, text });
+    streams.push({ stream, ...await streamBoundedDiff(leftPath, rightPath, project.root, stream, leftId, rightId, { maxLines: boundedLines, maxChars }) });
   }
   return {
     leftRunId: leftId,

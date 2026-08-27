@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { formatPacket, formatRepositoryCommandProof, resolveProject, gitSnapshot, repositoryCommandProof, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, lintRepository, runCommand, runRepositoryCommand, searchRepository, buildCurrentOperationContext, filesystemIdentity, inspectRuntimeAuthority, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, repeatedOperationSequences, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { formatPacket, formatRepositoryCommandImpact, formatRepositoryCommandProof, resolveProject, gitSnapshot, repositoryCommandImpact, repositoryCommandProof, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, lintRepository, runCommand, runRepositoryCommand, searchRepository, buildCurrentOperationContext, filesystemIdentity, inspectRuntimeAuthority, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, repeatedOperationSequences, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 const HELP = `hate.this.meaningless.life · context condenser
 
@@ -15,6 +15,7 @@ Run from any Git repository:
   hud tools                         discovered tools and repository commands
   hud repository-command <name>    run a repository-owned typed command
   hud proof <name>                 reuse current successful evidence without executing
+  hud impact <name>                inspect retained stage evidence against current paths
 
 Retained evidence (never reruns the command):
   hud history [count]
@@ -331,6 +332,15 @@ async function main() {
     if (options.json) console.log(JSON.stringify(proof, null, 2));
     else console.log(formatRepositoryCommandProof(proof));
     process.exitCode = proof.state === 'CURRENT' ? 0 : proof.state === 'STALE' ? 1 : 2;
+    return;
+  }
+  if (command === 'impact') {
+    const name = args[0];
+    if (!name || args.length !== 1) throw new Error('hud impact requires exactly one discovered repository command name.');
+    const impact = await repositoryCommandImpact(project, name);
+    if (options.json) console.log(JSON.stringify(impact, null, 2));
+    else console.log(formatRepositoryCommandImpact(impact));
+    process.exitCode = impact.state === 'CURRENT' ? 0 : impact.state === 'STALE' ? 1 : 2;
     return;
   }
   if (command === 'lint') {
