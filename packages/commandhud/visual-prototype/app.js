@@ -18,6 +18,7 @@
   let search = state?.lastOperation?.type === 'search' ? state.lastOperation : null;
   const searchFiles = new Map((search?.files || []).map((file) => [file.path, file]));
   const searchOrder = (search?.files || []).map((file) => file.path);
+  const lintFiles = new Set(state?.lastOperation?.type === 'lint' ? state.lastOperation.files || [] : []);
   let activeSearchRunId = search ? state?.last?.runId : null;
   const app = $('#app');
   const viewport = $('#viewport');
@@ -54,6 +55,7 @@
       ['Copy last handoff', 'Copy compact context for the last structured operation.', '', 'evidence', null, 'handoff'],
     ],
     Repository: [
+      ['Lint repository', 'Run the repository-owned linter and retain its complete evidence.', 'hud lint', 'repository', null, 'lint-repository'],
       ['Current semantic state', 'Inspect the complete derived HUD snapshot.', 'hud state --json', 'HUD'],
       ['Repository tree', 'Inspect the Git-backed repository projection.', 'hud tree', 'HUD'],
     ],
@@ -199,6 +201,10 @@
     return count;
   }
 
+  function directoryHasLint(directory) {
+    return directory.files.some((file) => lintFiles.has(file.path)) || directory.directories.some(directoryHasLint);
+  }
+
   function applyCamera() {
     world.style.transform = `translate(${camera.x}px,${camera.y}px) scale(${camera.z})`;
   }
@@ -232,7 +238,7 @@
     if (directory.path) {
       const row = document.createElement('button');
       const matchCount = directorySearchCount(directory);
-      row.className = `tree-row${currentDirectory === directory.path ? ' selected' : ''}${matchCount ? ' search-match' : ''}`;
+      row.className = `tree-row${currentDirectory === directory.path ? ' selected' : ''}${matchCount || directoryHasLint(directory) ? ' search-match' : ''}`;
       row.dataset.directory = directory.path;
       row.dataset.depth = String(depth);
       row.style.paddingLeft = `${8 + depth * 15}px`;
@@ -244,7 +250,7 @@
     for (const file of directory.files) {
       const row = document.createElement('button');
       const match = searchFiles.get(file.path);
-      row.className = `tree-row${selected?.path === file.path ? ' selected' : ''}${match ? ' search-match' : ''}`;
+      row.className = `tree-row${selected?.path === file.path ? ' selected' : ''}${match || lintFiles.has(file.path) ? ' search-match' : ''}`;
       row.dataset.file = file.path;
       row.dataset.depth = String(depth + (directory.path ? 1 : 0));
       row.style.paddingLeft = `${23 + (depth + (directory.path ? 1 : 0)) * 15}px`;
@@ -377,12 +383,12 @@
       button.style.cssText = `left:${x}px;top:${y}px`;
       if (item.type === 'directory') {
         const matchCount = directorySearchCount(item.value);
-        if (matchCount) button.classList.add('search-match');
+        if (matchCount || directoryHasLint(item.value)) button.classList.add('search-match');
         button.dataset.directory = path;
         button.innerHTML = `<span class="orbit-name">${item.value.name}</span><span class="orbit-meta">${descendants(item.value)} files${matchCount ? ` · ${matchCount} matches` : ''}</span>`;
       } else {
         const match = searchFiles.get(path);
-        if (match) button.classList.add('search-match');
+        if (match || lintFiles.has(path)) button.classList.add('search-match');
         button.dataset.file = path;
         button.innerHTML = `<span class="orbit-name">${item.value.name}</span><span class="orbit-meta">${item.value.kind} · ${formatSize(item.value.size)}${match ? ` · ${match.count} matches` : ''}</span>`;
       }
@@ -982,6 +988,55 @@
     }
   }
 
+  function confirmLint() {
+    togglePicker(false);
+    if (!liveState) return stageCommand('hud lint');
+    const authority = (state.commands || []).find((entry) => entry.kind === 'lint' || entry.name === 'lint' || entry.name === 'npm:lint');
+    output.classList.add('open');
+    $('#outputTitle').textContent = 'Confirm repository lint';
+    $('#outputText').textContent = authority
+      ? `LINT\n${authority.command}\n\nThis exact repository-declared command will run locally and retain raw evidence.`
+      : 'This repository does not currently declare a lint command.';
+    $('#outputResults').replaceChildren();
+    const actions = $('#outputActions');
+    actions.replaceChildren(outputAction('Cancel', '', () => output.classList.remove('open')));
+    if (authority) actions.appendChild(outputAction('Run lint', 'confirm', executeLint));
+    actions.classList.add('open');
+  }
+
+  async function executeLint() {
+    $('#outputActions').replaceChildren();
+    $('#outputActions').classList.remove('open');
+    $('#outputTitle').textContent = 'Lint running';
+    $('#outputText').textContent = 'Waiting for the repository-owned lint command…';
+    showRuntime({ busy: { type: 'lint' } });
+    try {
+      const response = await fetch('/operations/lint', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      });
+      const result = await response.json();
+      if (!response.ok) { if (result.busy) showRuntime({ busy: result.busy }); throw new Error(result.error || `Lint request failed with HTTP ${response.status}.`); }
+      state = result.state;
+      lintFiles.clear();
+      for (const path of result.operation.files || []) lintFiles.add(path);
+      renderTree();
+      renderMap();
+      $('#outputTitle').textContent = `Lint ${result.status}`;
+      const diagnostics = (result.operation.diagnostics || []).slice(0, 12).map((item) => `${item.path}:${item.line}:${item.column} ${item.severity} ${item.code || ''} ${item.message}`.trim());
+      const markers = (result.operation.markers || []).map((item) => item.raw);
+      $('#outputText').textContent = `${result.operation.command}\n\n${result.operation.diagnosticCount} diagnostics in ${result.operation.fileCount} files${markers.length ? `\n${markers.join('\n')}` : ''}${diagnostics.length ? `\n\n${diagnostics.join('\n')}` : ''}\n\nRaw evidence: run:${result.runId}`;
+      const actions = $('#outputActions');
+      actions.replaceChildren(outputAction('Copy handoff', 'confirm', copyHandoff));
+      appendEvidenceActions(actions, result.runId);
+      actions.classList.add('open');
+      showRuntime({ busy: null });
+    } catch (error) {
+      $('#outputTitle').textContent = 'Lint rejected';
+      $('#outputText').textContent = error.message;
+      await refreshRuntime();
+    }
+  }
+
   function outputAction(label, className, handler) {
     const button = document.createElement('button');
     button.type = 'button';
@@ -1283,6 +1338,7 @@
     if (action === 'history') return showHistory();
     if (action === 'undo') return showLatestUndo();
     if (action === 'refresh') return window.location.reload();
+    if (action === 'lint-repository') return confirmLint();
     if (action === 'search-repository' || action === 'search-current') return enterSearchMode(action === 'search-current' ? '{current}' : '.');
     if (chosen[4]) {
       confirmRepositoryCommand(chosen);

@@ -607,7 +607,7 @@ function repositoryCommandDefinitions(root) {
       throw new Error(`Invalid CommandHUD success marker declaration: ${name}`);
     }
     if (typeof resultMarkers !== 'boolean') throw new Error(`Invalid CommandHUD result marker declaration: ${name}`);
-    if (kind !== null && !['test', 'audit', 'smoke'].includes(kind)) throw new Error(`Invalid CommandHUD command kind: ${name}`);
+    if (kind !== null && !['test', 'audit', 'smoke', 'lint'].includes(kind)) throw new Error(`Invalid CommandHUD command kind: ${name}`);
     if (owner) {
       const ownerPath = resolve(root, owner);
       const ownerRelative = relative(root, ownerPath);
@@ -668,6 +668,34 @@ export function parseResultMarkers(stdout, stderr = '') {
     }
   }
   return markers;
+}
+
+export function parseLintDiagnostics(stdout, stderr = '', root = process.cwd()) {
+  const diagnostics = [];
+  const seen = new Set();
+  for (const content of [stdout, stderr]) {
+    for (const raw of normalizeTerminalText(String(content || ''), root).split(/\r?\n/)) {
+      const line = raw.trim();
+      const typescript = line.match(/^(.+?)\((\d+),(\d+)\):\s*(error|warning)\s+([A-Z]+\d+):\s*(.+)$/i);
+      const standard = line.match(/^(.+?):(\d+):(\d+):\s*(error|warning)\s*:?[ \t]*(.+?)(?:\s+\[([^\]]+)\])?$/i);
+      const match = typescript || standard;
+      if (!match) continue;
+      const rawPath = match[1].replaceAll('\\', '/');
+      const absolute = resolve(root, rawPath);
+      const inside = relative(root, absolute);
+      if (isAbsolute(inside) || inside === '..' || inside.startsWith(`..${process.platform === 'win32' ? '\\' : '/'}`) || !existsSync(absolute)) continue;
+      const diagnostic = typescript ? {
+        path: inside.replaceAll('\\', '/'), line: Number(match[2]), column: Number(match[3]),
+        severity: match[4].toLowerCase(), code: match[5], message: match[6],
+      } : {
+        path: inside.replaceAll('\\', '/'), line: Number(match[2]), column: Number(match[3]),
+        severity: match[4].toLowerCase(), code: match[6] || null, message: match[5],
+      };
+      const key = JSON.stringify(diagnostic);
+      if (!seen.has(key)) { seen.add(key); diagnostics.push(diagnostic); }
+    }
+  }
+  return diagnostics.sort((a, b) => a.path.localeCompare(b.path, 'en') || a.line - b.line || a.column - b.column || a.message.localeCompare(b.message, 'en'));
 }
 
 function decodePowerShellCliXml(value) {
@@ -1044,11 +1072,12 @@ export async function recoverInterruptedRuns(project) {
       if (patch.stdout) writeFileSync(patchPath, patch.stdout, { flag: 'wx' });
       record.delta = { kind: 'worktree-patch', treeBefore: inflight.treeBefore, treeAfter, paths, fileCount: paths.length, patchPath: patch.stdout ? patchPath : null };
     }
-    if (inflight.operationIdentity?.type === 'repository-command') {
+    if (inflight.operationIdentity?.type === 'repository-command' || inflight.operationIdentity?.type === 'lint') {
       record.operation = {
         ...inflight.operationIdentity, command: inflight.command, exitCode: null,
         status: 'interrupted', durationMs: record.durationMs, summary: [...reduction.summary], markers: [...reduction.markers],
       };
+      if (inflight.operationIdentity.type === 'lint') Object.assign(record.operation, { diagnosticCount: 0, fileCount: 0, files: [], diagnostics: [] });
     } else if (inflight.operationIdentity?.type === 'terminal-command') {
       record.operation = {
         ...inflight.operationIdentity, command: inflight.command, exitCode: null,
@@ -1122,9 +1151,7 @@ export async function searchRepository(project, query, scope = '.', { stream = f
   });
 }
 
-export async function runRepositoryCommand(project, name, { stream = false, signal = null, onStart = null, onOutput = null, origin = 'core-api' } = {}) {
-  const selected = repositoryCommandDefinitions(project.root).find((command) => command.name === String(name || ''));
-  if (!selected) throw new Error(`Unknown repository command: ${name}`);
+function repositoryCommandArgv(selected) {
   let argv = [...selected.argv];
   if (process.platform === 'win32' && argv[0] === 'npm') {
     if (argv.slice(1).some((argument) => !/^[A-Za-z0-9:._/-]+$/.test(argument))) {
@@ -1132,6 +1159,13 @@ export async function runRepositoryCommand(project, name, { stream = false, sign
     }
     argv = [process.env.ComSpec || 'cmd.exe', '/d', '/s', '/c', `npm.cmd ${argv.slice(1).join(' ')}`];
   }
+  return argv;
+}
+
+export async function runRepositoryCommand(project, name, { stream = false, signal = null, onStart = null, onOutput = null, origin = 'core-api' } = {}) {
+  const selected = repositoryCommandDefinitions(project.root).find((command) => command.name === String(name || ''));
+  if (!selected) throw new Error(`Unknown repository command: ${name}`);
+  const argv = repositoryCommandArgv(selected);
   return runCommand(project, argv, {
     request: `run repository command ${selected.name}`,
     objective: `Run ${selected.command}`,
@@ -1151,6 +1185,30 @@ export async function runRepositoryCommand(project, name, { stream = false, sign
       summary: [...record.reduction.summary],
       markers: [...record.reduction.markers],
     }),
+  });
+}
+
+export async function lintRepository(project, { stream = false, signal = null, onStart = null, onOutput = null, origin = 'core-api' } = {}) {
+  const commands = repositoryCommandDefinitions(project.root);
+  const selected = commands.find((command) => command.name === 'lint') || commands.find((command) => command.name === 'npm:lint');
+  if (!selected) throw new Error('This repository does not declare a lint command.');
+  const argv = repositoryCommandArgv(selected);
+  return runCommand(project, argv, {
+    request: 'lint repository', objective: `Lint with ${selected.command}`,
+    stream, origin, shell: false, captureDelta: true, reductionKind: 'lint',
+    successMarkers: selected.successMarkers, resultMarkers: selected.resultMarkers,
+    signal, onStart, onOutput,
+    operationIdentity: { type: 'lint', authority: selected.name, displayCommand: selected.command },
+    operationReducer: ({ stdout, stderr, exitCode, command, record }) => {
+      const diagnostics = parseLintDiagnostics(stdout, stderr, project.root);
+      const files = [...new Set(diagnostics.map((diagnostic) => diagnostic.path))].sort((a, b) => a.localeCompare(b, 'en'));
+      return {
+        type: 'lint', authority: selected.name, displayCommand: selected.command, command, exitCode,
+        status: record.status, durationMs: record.durationMs,
+        diagnosticCount: diagnostics.length, fileCount: files.length, files, diagnostics,
+        summary: [...record.reduction.summary], markers: [...record.reduction.markers],
+      };
+    },
   });
 }
 
@@ -1338,6 +1396,23 @@ export function buildOperationContext(project, record, { currentCurrency = null 
     for (const marker of operation.markers || []) {
       const fields = Object.entries(marker.fields).map(([key, value]) => `${key}=${value}`).join(' ');
       lines.push(`MARKER ${marker.event}=${marker.status}${fields ? ` ${fields}` : ''}`);
+    }
+  } else if (operation.type === 'lint') {
+    lines.push(`AUTHORITY ${operation.authority}`);
+    lines.push(`COMMAND ${operation.displayCommand || operation.command}`);
+    lines.push(operation.status === 'interrupted'
+      ? `RESULT INTERRUPTED completion-not-observed duration=${operation.durationMs}ms`
+      : `RESULT ${operation.status.toUpperCase()} exit=${operation.exitCode} diagnostics=${operation.diagnosticCount} files=${operation.fileCount} duration=${operation.durationMs}ms`);
+    for (const marker of operation.markers || []) {
+      const fields = Object.entries(marker.fields).map(([key, value]) => `${key}=${value}`).join(' ');
+      lines.push(`MARKER ${marker.event}=${marker.status}${fields ? ` ${fields}` : ''}`);
+    }
+    if (operation.diagnostics.length) {
+      lines.push('', 'DIAGNOSTICS');
+      for (const diagnostic of operation.diagnostics.slice(0, 100)) {
+        lines.push(`${diagnostic.path}:${diagnostic.line}:${diagnostic.column} ${diagnostic.severity}${diagnostic.code ? ` ${diagnostic.code}` : ''} ${diagnostic.message}`);
+      }
+      if (operation.diagnostics.length > 100) lines.push(`... ${operation.diagnostics.length - 100} additional diagnostics retained in raw evidence`);
     }
   } else if (operation.type === 'terminal-command') {
     lines.push(`SHELL ${operation.shellLabel || operation.shell}`);
@@ -1608,6 +1683,7 @@ export function operationSequenceIdentity(record) {
   const operation = record?.operation;
   if (!operation?.type) return null;
   if (operation.type === 'repository-command') return { key: `repository-command:${operation.name}`, label: `repository-command ${operation.name}` };
+  if (operation.type === 'lint') return { key: `lint:${operation.authority}`, label: `lint ${operation.authority}` };
   if (operation.type === 'terminal-command') {
     const command = operation.displayCommand || operation.command;
     return command ? { key: `terminal-command:${operation.shell}:${command}`, label: `terminal ${operation.shell} ${command}` } : null;
@@ -1795,7 +1871,7 @@ export async function operationHistory(project, limit = 25) {
   return listRuns(project, 100).filter((record) => record.operation).slice(0, bounded).map((record) => ({
     runId: record.id,
     type: record.operation.type,
-    name: record.operation.name || (record.operation.type === 'undo' ? `Undo ${record.operation.targetRunId}` : null),
+    name: record.operation.name || (record.operation.type === 'lint' ? `Lint ${record.operation.authority}` : record.operation.type === 'undo' ? `Undo ${record.operation.targetRunId}` : null),
     query: record.operation.query || null,
     scope: record.operation.scope || '.',
     command: record.operation.command,
@@ -1808,6 +1884,8 @@ export async function operationHistory(project, limit = 25) {
     result: record.status === 'interrupted' ? 'Interrupted; completion not observed'
       : record.operation.type === 'search'
       ? `${record.operation.matchCount} matches / ${record.operation.fileCount} files`
+      : record.operation.type === 'lint'
+        ? `${record.operation.diagnosticCount} diagnostics / ${record.operation.fileCount} files`
       : record.operation.type === 'undo'
         ? `${record.operation.fileCount} files restored`
         : record.operation.summary?.join('; ') || `exit ${record.exitCode}`,

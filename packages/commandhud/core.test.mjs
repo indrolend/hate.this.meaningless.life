@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildCurrentOperationContext, buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, classifyPowerShellShellFailure, compareFilesystemFiles, continuation, currentState, detectRepeatedOperationSequences, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, gitSnapshot, inspectRuntimeAuthority, operationDetail, operationHistory, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
+import { buildCurrentOperationContext, buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, classifyPowerShellShellFailure, compareFilesystemFiles, continuation, currentState, detectRepeatedOperationSequences, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, gitSnapshot, inspectRuntimeAuthority, lintRepository, listRuns, operationDetail, operationHistory, parseLintDiagnostics, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -345,6 +345,56 @@ test('repository command execution resolves a current discovered identity and re
 
   await assert.rejects(() => runRepositoryCommand(project, 'not-declared'), /Unknown repository command/);
   assert.equal(readProjectState(project).lastRunId, redo.id);
+});
+
+test('lint diagnostics retain only factual repository-contained file locations', () => {
+  const root = mkdtempSync(join(tmpdir(), 'hud-lint-diagnostics-'));
+  mkdirSync(join(root, 'src'));
+  writeFileSync(join(root, 'src', 'app.ts'), 'const value = 1;\n');
+  const diagnostics = parseLintDiagnostics([
+    'src/app.ts(4,7): error TS2322: Type string is not assignable.',
+    'src/app.ts:8:2: warning: Prefer const [prefer-const]',
+    '../outside.ts:1:1: error: invented',
+  ].join('\n'), '', root);
+  assert.deepEqual(diagnostics, [
+    { path: 'src/app.ts', line: 4, column: 7, severity: 'error', code: 'TS2322', message: 'Type string is not assignable.' },
+    { path: 'src/app.ts', line: 8, column: 2, severity: 'warning', code: 'prefer-const', message: 'Prefer const' },
+  ]);
+});
+
+test('typed lint resolves declared authority and records markers, diagnostics, and raw evidence', async () => {
+  const root = fixture();
+  mkdirSync(join(root, 'tools'));
+  mkdirSync(join(root, 'src'));
+  writeFileSync(join(root, 'src', 'app.js'), 'const value = 1;\n');
+  writeFileSync(join(root, 'tools', 'lint.mjs'), [
+    `console.log('src/app.js:1:7: warning: fixture warning [fixture-rule]');`,
+    `console.log('LINT=PASS javascript=1');`,
+  ].join('\n'));
+  const identityPath = join(root, 'distribution', 'project.json');
+  const identity = JSON.parse(readFileSync(identityPath, 'utf8'));
+  identity.commandHud = { commands: [{ name: 'lint', command: 'node tools/lint.mjs', argv: ['node', 'tools/lint.mjs'], owner: 'tools/lint.mjs', kind: 'lint', resultMarkers: true }] };
+  writeFileSync(identityPath, JSON.stringify(identity));
+  execFileSync('git', ['add', 'tools/lint.mjs', 'src/app.js', 'distribution/project.json'], { cwd: root });
+  execFileSync('git', ['commit', '-m', 'add lint fixture'], { cwd: root });
+  const project = await resolveProject({ cwd: root, env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'hud-lint-state-')) } });
+  const record = await lintRepository(project, { origin: 'cli-argv' });
+  assert.equal(record.status, 'pass');
+  assert.equal(record.operation.type, 'lint');
+  assert.equal(record.operation.authority, 'lint');
+  assert.equal(record.operation.diagnosticCount, 1);
+  assert.deepEqual(record.operation.files, ['src/app.js']);
+  assert.equal(record.operation.diagnostics[0].code, 'fixture-rule');
+  assert.deepEqual(record.operation.markers.map(({ event, status, fields }) => ({ event, status, fields })), [
+    { event: 'LINT', status: 'PASS', fields: { javascript: '1' } },
+  ]);
+  assert.match(buildOperationHandoff(project, record), /OPERATION LINT/);
+  assert.match(buildOperationHandoff(project, record), /RESULT PASS exit=0 diagnostics=1 files=1/);
+  assert.match(buildOperationHandoff(project, record), /src\/app\.js:1:7 warning fixture-rule fixture warning/);
+
+  const missing = await fixtureProject();
+  await assert.rejects(() => lintRepository(missing), /does not declare a lint command/);
+  assert.equal(listRuns(missing, 10).length, 0);
 });
 
 test('repository command cancellation preserves partial changes and reversible evidence', async () => {

@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildCurrentOperationContext, filesystemIdentity, inspectRuntimeAuthority, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, repeatedOperationSequences, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, lintRepository, runCommand, runRepositoryCommand, searchRepository, buildCurrentOperationContext, filesystemIdentity, inspectRuntimeAuthority, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, repeatedOperationSequences, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 const HELP = `hate.this.meaningless.life · context condenser
 
@@ -11,6 +11,7 @@ Run from any Git repository:
   hud run -- <command>              record one command and print a compact packet
   hud state [--json]                current repository and last-operation state
   hud search <query> [scope]        recorded ripgrep search
+  hud lint                          run the repository-declared lint authority
   hud tools                         discovered tools and repository commands
   hud repository-command <name>    run a repository-owned typed command
 
@@ -317,6 +318,32 @@ async function main() {
       console.log(`STATUS ${result.status.toUpperCase()}`);
       console.log(`DURATION ${result.durationMs}ms`);
       if (result.summary.length) console.log(`SUMMARY ${result.summary.join('; ')}`);
+      console.log(`RAW run:${record.id}`);
+    }
+    process.exitCode = record.status === 'pass' ? 0 : record.status === 'blocked' ? 2 : 1;
+    return;
+  }
+  if (command === 'lint') {
+    if (args.length) throw new Error('hud lint does not accept command text or undeclared arguments.');
+    const record = await lintRepository(project, { stream: !options.quiet, origin: 'cli-argv' });
+    if (options.json) {
+      console.log(JSON.stringify({
+        runId: record.id, status: record.status, operation: record.operation,
+        presentation: record.presentation, stdoutPath: record.stdoutPath, stderrPath: record.stderrPath,
+        currency: record.currencyAfter,
+      }, null, 2));
+    } else {
+      const result = record.operation;
+      console.log(`LINT ${result.status.toUpperCase()}`);
+      console.log(`AUTHORITY ${result.authority}`);
+      console.log(`COMMAND ${result.displayCommand}`);
+      console.log(`DIAGNOSTICS ${result.diagnosticCount}`);
+      console.log(`FILES ${result.fileCount}`);
+      for (const marker of result.markers) {
+        const fields = Object.entries(marker.fields).map(([key, value]) => `${key}=${value}`).join(' ');
+        console.log(`MARKER ${marker.event}=${marker.status}${fields ? ` ${fields}` : ''}`);
+      }
+      for (const diagnostic of result.diagnostics.slice(0, 100)) console.log(`${diagnostic.path}:${diagnostic.line}:${diagnostic.column} ${diagnostic.severity}${diagnostic.code ? ` ${diagnostic.code}` : ''} ${diagnostic.message}`);
       console.log(`RAW run:${record.id}`);
     }
     process.exitCode = record.status === 'pass' ? 0 : record.status === 'blocked' ? 2 : 1;

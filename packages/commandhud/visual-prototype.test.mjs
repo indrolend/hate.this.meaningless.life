@@ -17,6 +17,9 @@ test('visual HUD exposes one main menu over one command directory', () => {
   assert.match(app, /'undo'\]/);
   assert.match(app, /'history'\]/);
   assert.match(app, /'refresh'\]/);
+  assert.match(app, /'lint-repository'\]/);
+  assert.match(app, /fetch\('\/operations\/lint'/);
+  assert.match(app, /stageCommand\('hud lint'\)/);
   assert.match(app, /Commands ·/);
   assert.doesNotMatch(app, /Library ·/);
   assert.match(app, /openMenuSections = new Set\(\['HUD'\]\)/);

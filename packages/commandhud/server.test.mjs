@@ -17,6 +17,13 @@ function fixtureProject() {
     channel: 'test',
     manifest: 'https://example.invalid/manifest.json',
     commandHud: { commands: [{
+      name: 'lint',
+      command: 'node tools/lint.mjs',
+      argv: ['node', 'tools/lint.mjs'],
+      owner: 'tools/lint.mjs',
+      kind: 'lint',
+      resultMarkers: true,
+    }, {
       name: 'native-tests',
       command: 'node tools/run-native-tests.mjs',
       argv: ['node', 'tools/run-native-tests.mjs'],
@@ -29,6 +36,7 @@ function fixtureProject() {
   writeFileSync(join(root, 'media', 'clip.mp4'), Buffer.from('test-mp4'));
   writeFileSync(join(root, 'media', 'clip.mov'), Buffer.from('test-mov'));
   writeFileSync(join(root, 'tools', 'run-native-tests.mjs'), 'import { writeFileSync } from "node:fs"; console.log("STARTED"); writeFileSync(new URL("../media/generated.txt", import.meta.url), "created by command\\n"); await new Promise((resolve) => setTimeout(resolve, 1200)); console.log("x".repeat(70000)); console.log("100% tests passed, 0 tests failed out of 2")\n');
+  writeFileSync(join(root, 'tools', 'lint.mjs'), 'console.log("LINT=PASS javascript=1 typescript=1 whitespace=1")\n');
   execFileSync('git', ['init', '-b', 'main'], { cwd: root });
   execFileSync('git', ['config', 'user.email', 'hud@example.invalid'], { cwd: root });
   execFileSync('git', ['config', 'user.name', 'HUD Test'], { cwd: root });
@@ -218,7 +226,7 @@ test('HUD server serializes typed operations and exposes bounded evidence, live 
 
   const treeResponse = await fetch(`${base}/tree`);
   assert.equal(treeResponse.status, 200);
-  assert.equal((await treeResponse.json()).fileCount, 6);
+  assert.equal((await treeResponse.json()).fileCount, 7);
 
   const indexResponse = await fetch(`${base}/`);
   assert.equal(indexResponse.status, 200);
@@ -361,6 +369,23 @@ test('HUD server serializes typed operations and exposes bounded evidence, live 
   const historicalSource = await fetch(`${base}/source?path=${encodeURIComponent('media/tone.wav')}&context=0&run=${search.runId}`);
   assert.equal(historicalSource.status, 200);
   assert.equal((await historicalSource.json()).runId, search.runId);
+
+  const lintResponse = await fetch(`${base}/operations/lint`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+  });
+  assert.equal(lintResponse.status, 200);
+  const lint = await lintResponse.json();
+  assert.equal(lint.operation.type, 'lint');
+  assert.equal(lint.operation.authority, 'lint');
+  assert.equal(lint.operation.diagnosticCount, 0);
+  assert.deepEqual(lint.operation.markers.map(({ event, status }) => ({ event, status })), [{ event: 'LINT', status: 'PASS' }]);
+  assert.deepEqual(lint.operation.provenance, { origin: 'local-server', finalizedBy: 'process-exit' });
+  assert.equal(lint.state.last.runId, lint.runId);
+  const invalidLint = await fetch(`${base}/operations/lint`, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ command: 'anything' }),
+  });
+  assert.equal(invalidLint.status, 400);
+  assert.equal((await (await fetch(`${base}/state`)).json()).last.runId, lint.runId);
 
   const undoPreview = await (await fetch(`${base}/undo/${commandRunId}`)).json();
   assert.equal(undoPreview.state, 'SAFE');

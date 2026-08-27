@@ -2,7 +2,7 @@ import { closeSync, createReadStream, existsSync, openSync, readFileSync, readSy
 import { createServer } from 'node:http';
 import { dirname, extname, join, normalize, relative, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { buildCurrentOperationContext, classifyEvidence, currentState, discoverShells, lastRun, operationDetail, operationHistory, recoverInterruptedRuns, repositoryCurrency, repositoryTree, runById, runRepositoryCommand, runTerminalCommand, searchRepository, undoOperation, undoPlan } from './core.mjs';
+import { buildCurrentOperationContext, classifyEvidence, currentState, discoverShells, lastRun, lintRepository, operationDetail, operationHistory, recoverInterruptedRuns, repositoryCurrency, repositoryTree, runById, runRepositoryCommand, runTerminalCommand, searchRepository, undoOperation, undoPlan } from './core.mjs';
 
 const staticRoot = join(dirname(fileURLToPath(import.meta.url)), 'visual-prototype');
 const contentTypes = {
@@ -46,6 +46,13 @@ function searchRequest(value) {
   if (typeof value.query !== 'string' || !value.query.trim() || value.query.length > 500) throw Object.assign(new Error('Search query must be 1-500 characters.'), { statusCode: 400 });
   if (value.scope !== undefined && (typeof value.scope !== 'string' || !value.scope || value.scope.length > 500)) throw Object.assign(new Error('Search scope must be a repository-relative string.'), { statusCode: 400 });
   return { query: value.query, scope: value.scope || '.' };
+}
+
+function lintRequest(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw Object.assign(new Error('Lint request must be an object.'), { statusCode: 400 });
+  const unknown = Object.keys(value);
+  if (unknown.length) throw Object.assign(new Error(`Unsupported lint fields: ${unknown.join(', ')}`), { statusCode: 400 });
+  return {};
 }
 
 function repositoryCommandRequest(value) {
@@ -285,6 +292,17 @@ export function createHudServer(project, { terminal = false, onSessionClientsCha
           runId: record.id,
           status: record.status,
           operation: record.operation,
+          evidence: { stdout: record.stdoutPath, stderr: record.stderrPath },
+          state: await currentState(project),
+        });
+        return;
+      }
+      if (request.method === 'POST' && url.pathname === '/operations/lint') {
+        validateOperationRequest(request);
+        lintRequest(await jsonBody(request));
+        const record = await runTypedOperation('lint', 'repository lint authority', () => lintRepository(project, { origin: 'local-server' }));
+        json(response, 200, {
+          runId: record.id, status: record.status, operation: record.operation,
           evidence: { stdout: record.stdoutPath, stderr: record.stderrPath },
           state: await currentState(project),
         });
