@@ -254,8 +254,11 @@ export async function repositoryTree(root) {
 }
 
 export async function repositoryCurrency(root, projectId = null) {
-  const snapshot = await gitSnapshot(root);
-  const files = await exec('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], root);
+  const [head, files] = await Promise.all([
+    exec('git', ['rev-parse', 'HEAD'], root),
+    exec('git', ['ls-files', '-z', '--cached', '--others', '--exclude-standard'], root, { trim: false }),
+  ]);
+  if (!head.ok) throw new Error(`Unable to read repository HEAD: ${head.stderr}`);
   if (!files.ok) throw new Error(`Unable to enumerate repository currency: ${files.stderr}`);
   const paths = files.stdout.split('\0').filter(Boolean).sort((a, b) => a.localeCompare(b));
   const hash = createHash('sha256');
@@ -266,7 +269,7 @@ export async function repositoryCurrency(root, projectId = null) {
     hash.update('\0');
   }
   return {
-    project: projectId || readJson(projectIdentityPath(root))?.id || `local/${basename(root)}`, root: resolve(root), head: snapshot.head,
+    project: projectId || readJson(projectIdentityPath(root))?.id || `local/${basename(root)}`, root: resolve(root), head: head.stdout.trim(),
     worktreeFingerprint: `sha256:${hash.digest('hex')}`,
   };
 }
@@ -1675,13 +1678,18 @@ export async function currentState(project, { cwd = process.cwd() } = {}) {
   };
 }
 
-export function listRuns(project, limit = 10) {
+function runIdsNewest(project) {
   const root = join(project.store, 'runs', project.key);
-  if (!existsSync(root)) return [];
+  if (!existsSync(root)) return { root, ids: [] };
   const state = readProjectState(project);
   const ids = [];
   if (state?.lastRunId) ids.push(state.lastRunId);
   for (const id of readdirSync(root).sort().reverse()) if (!ids.includes(id)) ids.push(id);
+  return { root, ids };
+}
+
+export function listRuns(project, limit = 10) {
+  const { root, ids } = runIdsNewest(project);
   return ids.slice(0, limit).map((id) => readJson(join(root, id, 'run.json'))).filter(Boolean);
 }
 
@@ -1713,26 +1721,31 @@ export async function repositoryCommandProof(project, name) {
   const command = String(name || '');
   if (!discoverCommands(project.root).some((entry) => entry.name === command)) throw new Error(`Unknown repository command: ${command}`);
   const currentCurrency = await repositoryCurrency(project.root, project.identity.id);
-  const matching = listRuns(project, Number.MAX_SAFE_INTEGER).filter((record) =>
-    record.operation?.type === 'repository-command' && record.operation.name === command);
-  if (!matching.length) return proofFromRecord(command, 'MISSING', false, null, currentCurrency, 'UNKNOWN', 'No retained attempt exists for this command.');
   const classification = (record) => classifyProofCurrency(record.currencyAfter, currentCurrency);
-  const currentAttempt = matching.find((record) => classification(record) === 'CURRENT');
-  if (currentAttempt) {
-    const completePass = currentAttempt.status === 'pass' && currentAttempt.operation?.status === 'pass' &&
-      existsSync(currentAttempt.stdoutPath || '') && existsSync(currentAttempt.stderrPath || '');
-    if (completePass) return proofFromRecord(command, 'CURRENT', true, currentAttempt, currentCurrency, 'CURRENT', null);
-    return proofFromRecord(command, 'MISSING', false, currentAttempt, currentCurrency, 'CURRENT',
-      `The newest retained attempt for current bytes is ${currentAttempt.status || 'invalid'}.`);
+  const { root, ids } = runIdsNewest(project);
+  let newestMatching = null;
+  let newestSuccessful = null;
+  for (const id of ids) {
+    const record = readJson(join(root, id, 'run.json'));
+    if (record?.operation?.type !== 'repository-command' || record.operation.name !== command) continue;
+    newestMatching ||= record;
+    const proofCurrency = classification(record);
+    if (proofCurrency === 'CURRENT') {
+      const completePass = record.status === 'pass' && record.operation.status === 'pass' &&
+        existsSync(record.stdoutPath || '') && existsSync(record.stderrPath || '');
+      if (completePass) return proofFromRecord(command, 'CURRENT', true, record, currentCurrency, 'CURRENT', null);
+      return proofFromRecord(command, 'MISSING', false, record, currentCurrency, 'CURRENT',
+        `The newest retained attempt for current bytes is ${record.status || 'invalid'}.`);
+    }
+    if (!newestSuccessful && record.status === 'pass' && record.operation.status === 'pass') newestSuccessful = record;
   }
-  const successful = matching.find((record) => record.status === 'pass' && record.operation?.status === 'pass');
-  if (successful) {
-    const value = classification(successful);
-    return proofFromRecord(command, 'STALE', false, successful, currentCurrency, value,
+  if (!newestMatching) return proofFromRecord(command, 'MISSING', false, null, currentCurrency, 'UNKNOWN', 'No retained attempt exists for this command.');
+  if (newestSuccessful) {
+    const value = classification(newestSuccessful);
+    return proofFromRecord(command, 'STALE', false, newestSuccessful, currentCurrency, value,
       value === 'UNKNOWN' ? 'Retained proof currency is incomplete.' : 'Repository bytes changed.');
   }
-  const newest = matching[0];
-  return proofFromRecord(command, 'MISSING', false, newest, currentCurrency, classification(newest), 'No successful retained attempt exists for this command.');
+  return proofFromRecord(command, 'MISSING', false, newestMatching, currentCurrency, classification(newestMatching), 'No successful retained attempt exists for this command.');
 }
 
 export function formatRepositoryCommandProof(proof) {
