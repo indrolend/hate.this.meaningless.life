@@ -9,11 +9,15 @@ import {
 import { createShellVisualStatus, IDLE_FACE, visualMotionEnabled } from './shell-visual.mjs';
 import { createShellLayout, splitMouseInput } from './shell-layout.mjs';
 
+export function encodeClipboardInput(text, targetPlatform = process.platform) {
+  return targetPlatform === 'win32' ? Buffer.from(String(text), 'utf16le') : String(text);
+}
+
 function clipboard(text) {
   const tool = process.platform === 'win32' ? ['clip.exe', []]
     : process.platform === 'darwin' ? ['pbcopy', []]
       : ['sh', ['-c', 'command -v wl-copy >/dev/null && wl-copy || xclip -selection clipboard']];
-  const result = spawnSync(tool[0], tool[1], { input: text, encoding: 'utf8', windowsHide: true });
+  const result = spawnSync(tool[0], tool[1], { input: encodeClipboardInput(text), windowsHide: true });
   if (result.status !== 0) throw new Error('Clipboard tool is unavailable.');
 }
 
@@ -80,7 +84,7 @@ export function parseShellEvidenceCommand(command, fallbackRunId) {
 }
 
 export function renderShellEvidenceProjection(value) {
-  const lines = [`RUN ${value.runId} · ${value.mode.toUpperCase()}`];
+  const lines = [`SOURCE_EVIDENCE run:${value.runId} · ${value.mode.toUpperCase()}`];
   for (const stream of value.streams) {
     lines.push('', `${stream.stream.toUpperCase()}${stream.matchCount === undefined ? '' : ` · ${stream.matchCount} matches`}`);
     if (value.mode === 'raw') lines.push(stream.content || '(empty)');
@@ -88,6 +92,18 @@ export function renderShellEvidenceProjection(value) {
     if (stream.truncated) lines.push('… additional matching context retained in raw evidence');
   }
   return lines.join('\n').trimEnd();
+}
+
+export function deliverShellProjection(value, show, clipboardWriter = clipboard, source = 'evidence') {
+  show(`${value}\n\n`);
+  try {
+    clipboardWriter(value);
+    show(`COPIED ${source}\n\n`);
+    return { value, copied: true };
+  } catch (error) {
+    show(`NOT COPIED · ${error.message}\nProjection remains visible above.\n\n`);
+    return { value, copied: false };
+  }
 }
 
 export function renderShellResult(project, record, suppliedContext = null) {
@@ -283,7 +299,7 @@ export async function startHudShell(project, {
         try {
           const request = parseShellEvidenceCommand(command, previous?.id);
           const value = projectRunEvidence(project, request.runId, request);
-          show(`${renderShellEvidenceProjection(value)}\n\n`);
+          deliverShellProjection(renderShellEvidenceProjection(value), show, clipboardWriter, `run:${request.runId}`);
         } catch (error) { show(`${error.message}\n\n`); }
         continue;
       }
@@ -293,13 +309,13 @@ export async function startHudShell(project, {
         else {
           try {
             const value = await diffRunEvidence(project, left, right);
-            const lines = [`RUN_DIFF ${left} -> ${right}`, `DIFFERENT ${value.different}`];
+            const lines = [`SOURCE_EVIDENCE runs:${left},${right} · DIFF`, `DIFFERENT ${value.different}`];
             for (const stream of value.streams) {
               lines.push('', `${stream.stream.toUpperCase()} ${stream.different ? 'CHANGED' : 'UNCHANGED'}`);
               if (stream.text) lines.push(stream.text);
               if (stream.truncated) lines.push('… complete evidence remains in both runs');
             }
-            show(`${lines.join('\n')}\n\n`);
+            deliverShellProjection(lines.join('\n'), show, clipboardWriter, `runs:${left},${right}`);
           } catch (error) { show(`${error.message}\n\n`); }
         }
         continue;

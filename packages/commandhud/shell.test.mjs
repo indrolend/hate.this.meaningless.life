@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { deliverShellResult, parseShellEvidenceCommand, renderShellEvidenceProjection, renderShellResult, shellInputIncomplete } from './shell.mjs';
+import { deliverShellProjection, deliverShellResult, encodeClipboardInput, parseShellEvidenceCommand, renderShellEvidenceProjection, renderShellResult, shellInputIncomplete } from './shell.mjs';
 import { resolveProject } from './core.mjs';
 
 async function shellProject() {
@@ -33,8 +33,33 @@ test('terminal evidence projection keeps stream and factual line identity visibl
       { stream: 'stderr', matchCount: 0, lines: [], truncated: false },
     ],
   });
+  assert.match(rendered, /SOURCE_EVIDENCE run:20260826010101-abcd · FIND/);
   assert.match(rendered, /STDOUT · 1 matches\n7: needle/);
   assert.match(rendered, /STDERR · 0 matches\n\(no matching lines\)/);
+});
+
+test('requested retained-evidence projection becomes the exact clipboard payload', () => {
+  const projection = 'SOURCE_EVIDENCE run:20260826010101-abcd · HEAD\n\nSTDOUT\n1: useful';
+  let displayed = '';
+  let copied = '';
+  const result = deliverShellProjection(projection, (value) => { displayed += value; }, (value) => { copied = value; }, 'run:20260826010101-abcd');
+  assert.equal(result.copied, true);
+  assert.equal(copied, projection);
+  assert.match(displayed, /COPIED run:20260826010101-abcd/);
+
+  displayed = '';
+  const failure = deliverShellProjection(projection, (value) => { displayed += value; }, () => { throw new Error('clipboard unavailable'); });
+  assert.equal(failure.copied, false);
+  assert.match(displayed, /NOT COPIED · clipboard unavailable/);
+  assert.match(displayed, /Projection remains visible above/);
+});
+
+test('Windows clipboard transport preserves Unicode evidence symbols', () => {
+  const value = 'SOURCE_EVIDENCE run:test · HEAD ✓';
+  const encoded = encodeClipboardInput(value, 'win32');
+  assert.ok(Buffer.isBuffer(encoded));
+  assert.equal(encoded.toString('utf16le'), value);
+  assert.equal(encodeClipboardInput(value, 'linux'), value);
 });
 
 test('PowerShell input completeness recognizes structural continuation without executing text', () => {
@@ -169,6 +194,35 @@ test('terminal shell keeps running when automatic clipboard delivery fails', () 
   assert.equal(result.status, 0, result.stderr || result.stdout);
   assert.match(result.stdout, /NOT COPIED · clipboard unavailable/);
   assert.match(result.stdout, /Context remains available with \/context/);
+});
+
+test('terminal evidence request replaces clipboard while help remains UI-only', () => {
+  const productRoot = resolve(import.meta.dirname, '..', '..');
+  const root = mkdtempSync(join(tmpdir(), 'commandhud-shell-projection-copy-'));
+  execFileSync('git', ['init', '-b', 'main'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'hud@example.invalid'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'HUD Test'], { cwd: root });
+  execFileSync('git', ['commit', '--allow-empty', '-m', 'fixture'], { cwd: root });
+  const script = `
+    import { PassThrough } from 'node:stream';
+    import { resolveProject } from ${JSON.stringify(new URL('./core.mjs', import.meta.url).href)};
+    import { startHudShell } from ${JSON.stringify(new URL('./shell.mjs', import.meta.url).href)};
+    const input = new PassThrough(); let output = ''; const copies = [];
+    input.end('/help\\necho evidence\\n/head 1\\n/exit\\n');
+    const project = await resolveProject({ root: ${JSON.stringify(root)}, env: { ...process.env, HUD_STATE_ROOT: ${JSON.stringify(join(root, '.state'))} } });
+    await startHudShell(project, { input, output: { write(value) { output += value; } }, clipboardWriter(value) { copies.push(value); }, visual: false });
+    process.stdout.write(output + '\\nCLIPBOARD_B64=' + Buffer.from(JSON.stringify(copies)).toString('base64'));
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: productRoot, encoding: 'utf8', timeout: 15000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const encoded = result.stdout.match(/CLIPBOARD_B64=([^\s]+)/)?.[1];
+  assert.ok(encoded, result.stdout);
+  const copies = JSON.parse(Buffer.from(encoded, 'base64').toString('utf8'));
+  assert.equal(copies.length, 2);
+  assert.match(copies[0], /OPERATION TERMINAL-COMMAND/);
+  assert.doesNotMatch(copies[0], /\/help\s+show these controls/);
+  assert.match(copies[1], /^SOURCE_EVIDENCE run:[^ ]+ · HEAD/);
+  assert.match(copies[1], /STDOUT\n1: evidence/);
 });
 
 test('Windows repository launcher works from outside its checkout', {
