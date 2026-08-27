@@ -152,6 +152,7 @@ async function main() {
     const value = inspectRuntimeAuthority({
       executingPath: fileURLToPath(import.meta.url), project: selectedProject,
     });
+    process.exitCode = value.status === 'CURRENT' ? 0 : value.status === 'UNKNOWN' ? 2 : 1;
     if (options.json) return console.log(JSON.stringify(value, null, 2));
     console.log(`COMMANDHUD_RUNTIME ${value.status}`);
     printObject({ executing: value.executing.path, executing_role: value.executing.role, source: value.source?.cli.path || 'unknown', same_bytes: value.sameBytes ?? 'unknown' });
