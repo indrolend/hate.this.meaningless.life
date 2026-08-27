@@ -359,7 +359,7 @@ export function inspectRuntimeAuthority({ executingPath, project = null, env = p
   };
 }
 
-export async function recordFilesystemComparison(project, leftPath, rightPath, { stream = false } = {}) {
+export async function recordFilesystemComparison(project, leftPath, rightPath, { stream = false, origin = 'core-api' } = {}) {
   if (typeof leftPath !== 'string' || typeof rightPath !== 'string') throw new Error('hud compare-files requires two filesystem paths.');
   const moduleUrl = new URL('./core.mjs', import.meta.url).href;
   const script = `import { compareFilesystemFiles } from ${JSON.stringify(moduleUrl)};process.stdout.write(JSON.stringify(compareFilesystemFiles(process.argv[1],process.argv[2],{base:process.argv[3]})))`;
@@ -367,6 +367,7 @@ export async function recordFilesystemComparison(project, leftPath, rightPath, {
     request: `compare filesystem bytes ${leftPath} and ${rightPath}`,
     objective: 'Record byte-level source/runtime identity comparison',
     stream,
+    origin,
     shell: false,
     operationIdentity: { type: 'filesystem-comparison' },
     operationReducer: ({ stdout, command, record }) => {
@@ -464,7 +465,7 @@ async function windowsPowerShell(root) {
     ? 'pwsh.exe' : 'powershell.exe';
 }
 
-export async function observeWindowsService(project, name, { stream = false } = {}) {
+export async function observeWindowsService(project, name, { stream = false, origin = 'core-api' } = {}) {
   const service = windowsServiceName(name, 'service');
   const shell = await windowsPowerShell(project.root);
   const script = [
@@ -482,6 +483,7 @@ export async function observeWindowsService(project, name, { stream = false } = 
     request: `observe Windows service ${service}`,
     objective: `Record factual Windows service state for ${service}`,
     stream,
+    origin,
     shell: false,
     operationIdentity: { type: 'windows-service-observation', name: service },
     operationReducer: ({ stdout, command, record }) => ({
@@ -493,7 +495,7 @@ export async function observeWindowsService(project, name, { stream = false } = 
   });
 }
 
-export async function planWindowsServiceReset(project, name, { stream = false } = {}) {
+export async function planWindowsServiceReset(project, name, { stream = false, origin = 'core-api' } = {}) {
   const service = windowsServiceName(name, 'service-reset-plan');
   const shell = await windowsPowerShell(project.root);
   const script = [
@@ -514,6 +516,7 @@ export async function planWindowsServiceReset(project, name, { stream = false } 
     request: `plan Windows service reset ${service}`,
     objective: `Observe dependencies and plan a safe reset for ${service}`,
     stream,
+    origin,
     shell: false,
     operationIdentity: { type: 'windows-service-reset-plan', name: service },
     operationReducer: ({ stdout, command, record }) => {
@@ -779,6 +782,7 @@ export function buildPresentation(record) {
 
   return {
     status: record.status,
+    provenance: record.provenance || { origin: 'legacy-unknown', finalizedBy: 'unknown' },
     request: record.request || record.objective || record.command,
     headline,
     details,
@@ -823,8 +827,11 @@ export async function runCommand(project, tokens, {
   acceptedExitCodes = [0], operationReducer = null, shell = true, captureDelta = false,
   signal = null, onStart = null, onOutput = null, operationIdentity = null,
   cwd = project.root, displayCommand = null, reductionKind = null, successMarkers = [], resultMarkers = false,
+  origin = 'core-api',
 } = {}) {
   if (!tokens.length) throw new Error('hud run requires a command.');
+  const origins = new Set(['core-api', 'cli-argv', 'terminal-ui', 'local-server']);
+  if (!origins.has(origin)) throw new Error(`Unsupported operation origin: ${origin}`);
   const transportCommand = tokens.map((token) => /[\s"']/.test(token) ? JSON.stringify(token) : token).join(' ');
   const command = displayCommand || transportCommand;
   const [before, currencyBefore, treeBefore] = await Promise.all([
@@ -868,6 +875,7 @@ export async function runCommand(project, tokens, {
       request: request || null, command, transportCommand, argv: tokens, cwd, objective: objective || null,
       startedAt: started.toISOString(), pid: child.pid, captureDelta, treeBefore,
       gitBefore: before, currencyBefore, stdoutPath, stderrPath, operationIdentity, resultMarkers,
+      provenance: { origin },
     }, { exclusive: true });
   } catch (error) {
     await terminate(true);
@@ -923,6 +931,7 @@ export async function runCommand(project, tokens, {
     changedFiles: after.changedFiles, gitBefore: before, gitAfter: after,
     currencyBefore, currencyAfter,
     stdoutPath, stderrPath, reducer: reduction.reducer, reduction,
+    provenance: { origin, finalizedBy: 'process-exit' },
   };
   if (captureDelta) {
     const patch = await exec('git', ['diff', '--binary', '--full-index', treeBefore, treeAfter], project.root, { trim: false });
@@ -937,7 +946,10 @@ export async function runCommand(project, tokens, {
       fileCount: paths.length, patchPath: patch.stdout ? patchPath : null,
     };
   }
-  if (operationReducer) record.operation = operationReducer({ stdout, stderr, exitCode, command, record });
+  if (operationReducer) {
+    record.operation = operationReducer({ stdout, stderr, exitCode, command, record });
+    record.operation.provenance = record.provenance;
+  }
   record.presentation = buildPresentation(record);
   record.packet = buildPacket(record);
   atomicWriteJson(join(runDirectory, 'run.json'), record, { exclusive: true });
@@ -1005,6 +1017,7 @@ export async function recoverInterruptedRuns(project) {
       dirtyBefore: inflight.gitBefore.dirty, dirtyAfter: after.dirty, changedFiles: after.changedFiles,
       gitBefore: inflight.gitBefore, gitAfter: after, currencyBefore: inflight.currencyBefore, currencyAfter,
       stdoutPath: inflight.stdoutPath, stderrPath: inflight.stderrPath, reducer: reduction.reducer, reduction,
+      provenance: { origin: inflight.provenance?.origin || 'legacy-unknown', finalizedBy: 'startup-recovery' },
     };
     if (inflight.captureDelta && inflight.treeBefore && treeAfter) {
       const patch = await exec('git', ['diff', '--binary', '--full-index', inflight.treeBefore, treeAfter], project.root, { trim: false });
@@ -1028,6 +1041,7 @@ export async function recoverInterruptedRuns(project) {
         summary: [...reduction.summary],
       };
     }
+    if (record.operation) record.operation.provenance = record.provenance;
     record.presentation = buildPresentation(record);
     record.packet = buildPacket(record);
     atomicWriteJson(join(runDirectory, 'run.json'), record, { exclusive: true });
@@ -1069,7 +1083,7 @@ function repositoryScope(root, requested = '.') {
   return scope;
 }
 
-export async function searchRepository(project, query, scope = '.', { stream = false, tool = 'rg' } = {}) {
+export async function searchRepository(project, query, scope = '.', { stream = false, tool = 'rg', origin = 'core-api' } = {}) {
   if (!String(query || '')) throw new Error('hud search requires a query.');
   const selectedScope = repositoryScope(project.root, scope);
   const availability = await exec(tool, ['--version'], project.root);
@@ -1079,6 +1093,7 @@ export async function searchRepository(project, query, scope = '.', { stream = f
     objective: `Find ${query} in ${selectedScope}`,
     stream,
     shell: false,
+    origin,
     acceptedExitCodes: [0, 1],
     operationReducer: ({ stdout, exitCode, command }) => {
       const result = exitCode <= 1 ? parseSearchOutput(stdout) : { matches: 0, files: [] };
@@ -1091,7 +1106,7 @@ export async function searchRepository(project, query, scope = '.', { stream = f
   });
 }
 
-export async function runRepositoryCommand(project, name, { stream = false, signal = null, onStart = null, onOutput = null } = {}) {
+export async function runRepositoryCommand(project, name, { stream = false, signal = null, onStart = null, onOutput = null, origin = 'core-api' } = {}) {
   const selected = repositoryCommandDefinitions(project.root).find((command) => command.name === String(name || ''));
   if (!selected) throw new Error(`Unknown repository command: ${name}`);
   let argv = [...selected.argv];
@@ -1105,6 +1120,7 @@ export async function runRepositoryCommand(project, name, { stream = false, sign
     request: `run repository command ${selected.name}`,
     objective: `Run ${selected.command}`,
     stream,
+    origin,
     shell: false,
     captureDelta: true,
     reductionKind: selected.kind,
@@ -1153,7 +1169,7 @@ function repositoryDirectory(root, requested) {
 
 export async function runTerminalCommand(project, command, {
   shell = process.platform === 'win32' ? 'powershell' : 'bash', cwd = project.root,
-  stream = false, signal = null, onStart = null, onOutput = null,
+  stream = false, signal = null, onStart = null, onOutput = null, origin = 'core-api',
 } = {}) {
   const text = String(command || '');
   if (!text.trim()) throw new Error('Terminal command must not be empty.');
@@ -1191,6 +1207,7 @@ export async function runTerminalCommand(project, command, {
       request: `terminal ${shell}`,
       objective: `Run terminal command with ${selected.label}`,
       stream, shell: false, captureDelta: true, signal, onStart, onOutput,
+      origin,
       cwd: selectedCwd, displayCommand: text,
       operationIdentity: { type: 'terminal-command', shell, displayCommand: text, cwdBefore: selectedCwd },
       operationReducer: ({ exitCode, record }) => {
@@ -1236,7 +1253,7 @@ export async function undoPlan(project, runId) {
   };
 }
 
-export async function undoOperation(project, runId, { stream = false } = {}) {
+export async function undoOperation(project, runId, { stream = false, origin = 'core-api' } = {}) {
   const plan = await undoPlan(project, runId);
   if (plan.state !== 'SAFE') throw new Error(`Undo is ${plan.state}: ${plan.reason}`);
   const target = runById(project, runId);
@@ -1244,6 +1261,7 @@ export async function undoOperation(project, runId, { stream = false } = {}) {
     request: `undo recorded operation ${target.id}`,
     objective: `Safely reverse ${target.operation.type} run:${target.id}`,
     stream, shell: false, captureDelta: true,
+    origin,
     operationReducer: ({ exitCode, command, record }) => ({
       type: 'undo', targetRunId: target.id, targetType: target.operation.type,
       command, exitCode, status: record.status, durationMs: record.durationMs,
@@ -1277,6 +1295,7 @@ export function buildOperationContext(project, record, { currentCurrency = null 
     `BRANCH ${record.gitAfter?.branch || record.branch}`,
     `CWD ${operation.scope || (!cwdInside || cwdInside.startsWith('..') ? '.' : cwdInside)}`,
   ];
+  lines.push(`ORIGIN ${record.provenance?.origin || 'legacy-unknown'}`);
   if (currentCurrency) {
     const evidence = classifyEvidence(record.currencyAfter, currentCurrency);
     lines.push(`EVIDENCE ${evidence}`);
@@ -1695,6 +1714,7 @@ export async function operationHistory(project, limit = 25) {
     scope: record.operation.scope || '.',
     command: record.operation.command,
     status: record.status,
+    provenance: record.provenance || { origin: 'legacy-unknown', finalizedBy: 'unknown' },
     durationMs: record.durationMs,
     startedAt: record.startedAt,
     evidence: classifyEvidence(record.currencyAfter, currency),
@@ -1716,6 +1736,7 @@ export async function operationDetail(project, id) {
   return {
     runId: record.id,
     operation: record.operation,
+    provenance: record.provenance || { origin: 'legacy-unknown', finalizedBy: 'unknown' },
     status: record.status,
     durationMs: record.durationMs,
     startedAt: record.startedAt,

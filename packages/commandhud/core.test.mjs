@@ -269,12 +269,14 @@ test('repository command execution resolves a current discovered identity and re
   execFileSync('git', ['commit', '-m', 'add command fixture'], { cwd: root });
   const project = await resolveProject({ cwd: root, env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'hud-command-state-')) } });
 
-  const record = await runRepositoryCommand(project, 'native-tests');
+  const record = await runRepositoryCommand(project, 'native-tests', { origin: 'cli-argv' });
   assert.equal(record.status, 'pass');
   assert.equal(record.operation.type, 'repository-command');
   assert.equal(record.operation.name, 'native-tests');
   assert.equal(record.operation.displayCommand, 'node tools/run-native-tests.mjs');
   assert.equal(record.operation.command, 'node tools/run-native-tests.mjs');
+  assert.deepEqual(record.provenance, { origin: 'cli-argv', finalizedBy: 'process-exit' });
+  assert.deepEqual(record.operation.provenance, record.provenance);
   assert.deepEqual(record.operation.summary, ['3/3 CTest']);
   assert.deepEqual(record.operation.markers, [{ event: 'NATIVE_TESTS', status: 'PASS', fields: { count: '3' }, stream: 'stdout', line: 2, raw: 'NATIVE_TESTS=PASS count=3' }]);
   assert.match(readFileSync(record.stdoutPath, 'utf8'), /100% tests passed/);
@@ -288,14 +290,17 @@ test('repository command execution resolves a current discovered identity and re
   assert.deepEqual(await operationHistory(project), [{
     runId: record.id, type: 'repository-command', name: 'native-tests', query: null, scope: '.',
     command: 'node tools/run-native-tests.mjs', status: 'pass', durationMs: record.durationMs,
+    provenance: record.provenance,
     startedAt: record.startedAt, evidence: 'CURRENT', reversible: true, result: '3/3 CTest',
   }]);
   const detail = await operationDetail(project, record.id);
   assert.equal(detail.runId, record.id);
+  assert.deepEqual(detail.provenance, record.provenance);
   assert.deepEqual(detail.operation, record.operation);
   assert.equal(detail.evidence, 'CURRENT');
   assert.equal(detail.raw.stdout, record.stdoutPath);
   assert.match(detail.handoff, /OPERATION REPOSITORY-COMMAND/);
+  assert.match(detail.handoff, /ORIGIN cli-argv/);
   assert.equal(runById(project, '../run.json'), null);
 
   assert.deepEqual(await undoPlan(project, record.id), {
@@ -378,6 +383,8 @@ test('startup recovery records inactive in-flight evidence and preserves Undo', 
   assert.equal(record.status, 'interrupted');
   assert.equal(record.exitCode, null);
   assert.equal(record.operation.status, 'interrupted');
+  assert.deepEqual(record.provenance, { origin: 'legacy-unknown', finalizedBy: 'startup-recovery' });
+  assert.deepEqual(record.operation.provenance, record.provenance);
   assert.deepEqual(record.delta.paths, ['interrupted.txt']);
   assert.match(readFileSync(record.stdoutPath, 'utf8'), /partial output/);
   assert.equal(existsSync(join(directory, 'inflight.json')), false);

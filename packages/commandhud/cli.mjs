@@ -202,7 +202,7 @@ async function main() {
   }
   if (command === 'compare-files') {
     if (!args[0] || !args[1]) throw new Error('hud compare-files requires two filesystem paths.');
-    const record = await recordFilesystemComparison(project, args[0], args[1]);
+    const record = await recordFilesystemComparison(project, args[0], args[1], { origin: 'cli-argv' });
     const value = record.operation.comparison;
     if (options.json) return console.log(JSON.stringify({ runId: record.id, status: record.status, operation: record.operation, stdoutPath: record.stdoutPath, stderrPath: record.stderrPath }, null, 2));
     printObject({ status: value?.status || record.status, same_bytes: value?.sameBytes ?? 'unknown' });
@@ -213,7 +213,7 @@ async function main() {
   }
   if (command === 'service') {
     if (!args[0]) throw new Error('hud service requires a Windows service name.');
-    const record = await observeWindowsService(project, args[0]);
+    const record = await observeWindowsService(project, args[0], { origin: 'cli-argv' });
     if (options.json) return console.log(JSON.stringify({ runId: record.id, status: record.status, operation: record.operation, stdoutPath: record.stdoutPath, stderrPath: record.stderrPath }, null, 2));
     const value = record.operation;
     console.log(`SERVICE ${value.name}`);
@@ -230,7 +230,7 @@ async function main() {
   }
   if (command === 'service-reset-plan') {
     if (!args[0]) throw new Error('hud service-reset-plan requires a Windows service name.');
-    const record = await planWindowsServiceReset(project, args[0]);
+    const record = await planWindowsServiceReset(project, args[0], { origin: 'cli-argv' });
     if (options.json) return console.log(JSON.stringify({ runId: record.id, status: record.status, operation: record.operation, stdoutPath: record.stdoutPath, stderrPath: record.stderrPath }, null, 2));
     const value = record.operation;
     console.log(`SERVICE_RESET_PLAN ${value.name}`);
@@ -277,7 +277,7 @@ async function main() {
   if (command === 'search') {
     const query = args[0];
     const scope = args[1] || '.';
-    const record = await searchRepository(project, query, scope);
+    const record = await searchRepository(project, query, scope, { origin: 'cli-argv' });
     if (options.json) {
       console.log(JSON.stringify({
         runId: record.id, status: record.status, operation: record.operation,
@@ -301,7 +301,7 @@ async function main() {
   if (command === 'repository-command') {
     const name = args[0];
     if (!name) throw new Error('hud repository-command requires a discovered command name.');
-    const record = await runRepositoryCommand(project, name, { stream: !options.quiet });
+    const record = await runRepositoryCommand(project, name, { stream: !options.quiet, origin: 'cli-argv' });
     if (options.json) {
       console.log(JSON.stringify({
         runId: record.id, status: record.status, operation: record.operation,
@@ -333,7 +333,7 @@ async function main() {
   if (command === 'undo') {
     const runId = args[0];
     if (!runId) throw new Error('hud undo requires a recorded run ID.');
-    const record = await undoOperation(project, runId, { stream: !options.quiet });
+    const record = await undoOperation(project, runId, { stream: !options.quiet, origin: 'cli-argv' });
     if (options.json) return console.log(JSON.stringify({
       runId: record.id, status: record.status, operation: record.operation,
       stdoutPath: record.stdoutPath, stderrPath: record.stderrPath, currency: record.currencyAfter,
@@ -380,7 +380,7 @@ async function main() {
       index: Number.isInteger(options.stageIndex) ? options.stageIndex : null,
       count: Number.isInteger(options.stageCount) ? options.stageCount : null,
     } : null;
-    const record = await runCommand(project, args, { objective: options.objective, request, workflow, stream: !options.quiet });
+    const record = await runCommand(project, args, { objective: options.objective, request, workflow, stream: !options.quiet, origin: 'cli-argv' });
     const packet = formatPacket(record.packet);
     const view = record.presentation;
     console.log(`\n${view.status.toUpperCase()} - ${(view.durationMs / 1000).toFixed(1)}s`);

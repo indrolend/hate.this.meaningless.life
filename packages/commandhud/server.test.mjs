@@ -185,6 +185,7 @@ test('HUD server serializes typed operations and exposes bounded evidence, live 
   const state = await stateResponse.json();
   assert.equal(state.project.id, 'indrolend/data');
   assert.equal(state.lastOperation.type, 'search');
+  assert.equal(state.lastOperation.provenance.origin, 'core-api');
   assert.deepEqual(state.lastOperation.files, [{ path: 'media/tone.wav', count: 1, lines: [1] }]);
   assert.ok(state.repository.root.directories.some((directory) => directory.path === 'media'));
 
@@ -311,6 +312,7 @@ test('HUD server serializes typed operations and exposes bounded evidence, live 
   assert.equal(command.status, 'pass');
   assert.equal(command.operation.type, 'repository-command');
   assert.equal(command.operation.name, 'native-tests');
+  assert.deepEqual(command.operation.provenance, { origin: 'local-server', finalizedBy: 'process-exit' });
   assert.deepEqual(command.operation.summary, ['2/2 CTest']);
   assert.equal(command.state.last.runId, command.runId);
   assert.deepEqual(command.state.lastOperation, command.operation);
@@ -331,6 +333,7 @@ test('HUD server serializes typed operations and exposes bounded evidence, live 
   assert.equal(history.length, 3);
   assert.equal(history[0].runId, commandRunId);
   assert.equal(history[0].type, 'repository-command');
+  assert.deepEqual(history[0].provenance, { origin: 'local-server', finalizedBy: 'process-exit' });
   assert.equal(history[0].result, '2/2 CTest');
   assert.equal(history[1].type, 'search');
   const detailResponse = await fetch(`${base}/history/${search.runId}`);

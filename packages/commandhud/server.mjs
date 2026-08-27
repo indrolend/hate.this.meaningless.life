@@ -276,7 +276,7 @@ export function createHudServer(project, { terminal = false, onSessionClientsCha
         validateOperationRequest(request);
         const operation = searchRequest(await jsonBody(request));
         let record;
-        try { record = await runTypedOperation('search', `${operation.query} in ${operation.scope}`, () => searchRepository(project, operation.query, operation.scope)); }
+        try { record = await runTypedOperation('search', `${operation.query} in ${operation.scope}`, () => searchRepository(project, operation.query, operation.scope, { origin: 'local-server' })); }
         catch (error) {
           if (/Search scope (?:is outside|does not exist)/.test(error.message)) error.statusCode = 400;
           throw error;
@@ -322,7 +322,7 @@ export function createHudServer(project, { terminal = false, onSessionClientsCha
         try {
           record = await runTypedOperation(
             'repository-command', operation.name,
-            ({ signal, onStart }) => runRepositoryCommand(project, operation.name, { signal, onStart }),
+            ({ signal, onStart }) => runRepositoryCommand(project, operation.name, { signal, onStart, origin: 'local-server' }),
             { cancellable: true },
           );
         }
@@ -348,7 +348,7 @@ export function createHudServer(project, { terminal = false, onSessionClientsCha
         if (!shells.find((entry) => entry.id === operation.shell)?.available) throw Object.assign(new Error(`Terminal shell is unavailable: ${operation.shell}`), { statusCode: 400 });
         const record = await runTypedOperation(
           'terminal-command', operation.command,
-          ({ signal, onStart }) => runTerminalCommand(project, operation.command, { shell: operation.shell, cwd: terminalCwd, signal, onStart }),
+          ({ signal, onStart }) => runTerminalCommand(project, operation.command, { shell: operation.shell, cwd: terminalCwd, signal, onStart, origin: 'local-server' }),
           { cancellable: true },
         );
         if (record.operation?.cwdPersistence !== 'outside-repository') terminalCwd = record.operation.cwdAfter;
@@ -364,7 +364,7 @@ export function createHudServer(project, { terminal = false, onSessionClientsCha
         validateOperationRequest(request);
         const operation = undoRequest(await jsonBody(request));
         let record;
-        try { record = await runTypedOperation('undo', operation.runId, () => undoOperation(project, operation.runId)); }
+        try { record = await runTypedOperation('undo', operation.runId, () => undoOperation(project, operation.runId, { origin: 'local-server' })); }
         catch (error) {
           if (/^(?:Structured operation run was not found|Undo is )/.test(error.message)) error.statusCode = 409;
           throw error;

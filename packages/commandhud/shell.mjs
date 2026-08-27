@@ -256,7 +256,7 @@ export async function startHudShell(project, {
         if (!requested && plan.state === 'SAFE') planLines.push(`Apply explicitly with /undo ${target.id}`);
         if (!requested && plan.state === 'SAFE') show(`${planLines.join('\n')}\n\n`);
         else if (requested && plan.state === 'SAFE') {
-          const record = await undoOperation(project, target.id);
+          const record = await undoOperation(project, target.id, { origin: 'terminal-ui' });
           show(`${renderShellResult(project, record)}\n\n`);
         } else show(`${planLines.join('\n')}\n\n`);
         continue;
@@ -268,7 +268,7 @@ export async function startHudShell(project, {
       try {
         visualStatus.start(command);
         const record = await runTerminalCommand(project, command, {
-          shell: shell.id, cwd, stream: false, signal: activeController.signal,
+          shell: shell.id, cwd, stream: false, signal: activeController.signal, origin: 'terminal-ui',
         });
         await visualStatus.finish(record.status);
         cwd = record.operation.cwdAfter;
