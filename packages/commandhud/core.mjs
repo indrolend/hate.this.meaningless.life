@@ -1587,6 +1587,75 @@ export function listRuns(project, limit = 10) {
   return ids.slice(0, limit).map((id) => readJson(join(root, id, 'run.json'))).filter(Boolean);
 }
 
+export function operationSequenceIdentity(record) {
+  const operation = record?.operation;
+  if (!operation?.type) return null;
+  if (operation.type === 'repository-command') return { key: `repository-command:${operation.name}`, label: `repository-command ${operation.name}` };
+  if (operation.type === 'terminal-command') {
+    const command = operation.displayCommand || operation.command;
+    return command ? { key: `terminal-command:${operation.shell}:${command}`, label: `terminal ${operation.shell} ${command}` } : null;
+  }
+  if (operation.type === 'search') return { key: `search:${operation.scope}:${operation.query}`, label: `search ${operation.query} in ${operation.scope}` };
+  if (operation.type === 'undo') return { key: `undo:${operation.targetType}`, label: `undo ${operation.targetType}` };
+  const name = operation.name || operation.displayCommand || operation.command;
+  return name ? { key: `${operation.type}:${name}`, label: `${operation.type} ${name}` } : { key: operation.type, label: operation.type };
+}
+
+export function detectRepeatedOperationSequences(records, { minLength = 2, maxLength = 4, minOccurrences = 2, resultLimit = 10 } = {}) {
+  if (![minLength, maxLength, minOccurrences, resultLimit].every(Number.isInteger) || minLength < 2 || maxLength < minLength || maxLength > 6 || minOccurrences < 2 || resultLimit < 1 || resultLimit > 100) {
+    throw new Error('Repeated sequence bounds are invalid.');
+  }
+  const chronological = [...records].reverse().map((record) => {
+    const identity = operationSequenceIdentity(record);
+    return identity ? { record, identity } : null;
+  });
+  const candidates = new Map();
+  for (let length = minLength; length <= maxLength; length++) {
+    for (let start = 0; start + length <= chronological.length; start++) {
+      const window = chronological.slice(start, start + length);
+      if (window.some((entry) => !entry)) continue;
+      const key = JSON.stringify(window.map((entry) => entry.identity.key));
+      if (!candidates.has(key)) candidates.set(key, { sequence: window.map((entry) => entry.identity), length, occurrences: [] });
+      candidates.get(key).occurrences.push({
+        start,
+        runIds: window.map((entry) => entry.record.id),
+        statuses: window.map((entry) => entry.record.status),
+        startedAt: window[0].record.startedAt,
+      });
+    }
+  }
+  const repeated = [];
+  for (const candidate of candidates.values()) {
+    const nonOverlapping = [];
+    let previousEnd = -1;
+    for (const occurrence of candidate.occurrences) {
+      if (occurrence.start <= previousEnd) continue;
+      nonOverlapping.push(occurrence);
+      previousEnd = occurrence.start + candidate.length - 1;
+    }
+    if (nonOverlapping.length < minOccurrences) continue;
+    const occurrences = nonOverlapping.map(({ start, ...occurrence }) => ({
+      ...occurrence,
+      outcome: occurrence.statuses.every((status) => status === 'pass') ? 'pass' : 'non-pass',
+    }));
+    repeated.push({
+      sequence: candidate.sequence,
+      length: candidate.length,
+      count: occurrences.length,
+      passCount: occurrences.filter((item) => item.outcome === 'pass').length,
+      nonPassCount: occurrences.filter((item) => item.outcome !== 'pass').length,
+      occurrences,
+    });
+  }
+  return repeated.sort((a, b) => b.count - a.count || b.length - a.length || a.sequence[0].key.localeCompare(b.sequence[0].key, 'en')).slice(0, resultLimit);
+}
+
+export function repeatedOperationSequences(project, limit = 100) {
+  const bounded = Number(limit);
+  if (!Number.isInteger(bounded) || bounded < 2 || bounded > 500) throw new Error('hud sequences requires a history limit from 2 to 500.');
+  return detectRepeatedOperationSequences(listRuns(project, bounded));
+}
+
 export function runById(project, id) {
   const value = String(id || '');
   if (!/^\d{14}-[0-9a-f]{4}$/i.test(value)) return null;

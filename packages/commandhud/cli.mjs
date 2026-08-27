@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildCurrentOperationContext, filesystemIdentity, inspectRuntimeAuthority, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, runCommand, runRepositoryCommand, searchRepository, buildCurrentOperationContext, filesystemIdentity, inspectRuntimeAuthority, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, repeatedOperationSequences, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 const HELP = `hate.this.meaningless.life · context condenser
 
@@ -16,6 +16,7 @@ Run from any Git repository:
 
 Retained evidence (never reruns the command):
   hud history [count]
+  hud sequences [history-count]     report repeated adjacent operations; never executes
   hud handoff [--copy]
   hud raw|head|tail <run> [count]
   hud find <run> <pattern>
@@ -416,6 +417,18 @@ async function main() {
     const runs = listRuns(project, Number(args[0]) || 10);
     if (options.json) return console.log(JSON.stringify(runs, null, 2));
     for (const run of runs) console.log(`${run.id} ${run.status.toUpperCase()} exit=${run.exitCode} ${run.command}`);
+    return;
+  }
+  if (command === 'sequences') {
+    const sequences = repeatedOperationSequences(project, args[0] === undefined ? 100 : Number(args[0]));
+    if (options.json) return console.log(JSON.stringify({ sequences }, null, 2));
+    if (!sequences.length) return console.log('REPEATED_SEQUENCES none');
+    for (const [index, item] of sequences.entries()) {
+      if (index) console.log('');
+      console.log(`REPEATED_SEQUENCE count=${item.count} length=${item.length} pass=${item.passCount} non_pass=${item.nonPassCount}`);
+      for (const step of item.sequence) console.log(`  ${step.label}`);
+      for (const occurrence of item.occurrences) console.log(`  ${occurrence.outcome.toUpperCase()} runs=${occurrence.runIds.join(',')}`);
+    }
     return;
   }
   if (['raw', 'head', 'tail', 'find', 'around'].includes(command)) {

@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildCurrentOperationContext, buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, compareFilesystemFiles, continuation, currentState, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, gitSnapshot, inspectRuntimeAuthority, operationDetail, operationHistory, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
+import { buildCurrentOperationContext, buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, compareFilesystemFiles, continuation, currentState, detectRepeatedOperationSequences, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, gitSnapshot, inspectRuntimeAuthority, operationDetail, operationHistory, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -143,6 +143,27 @@ test('runtime authority distinguishes current, stale, and project-local duplicat
   });
   assert.equal(duplicate.status, 'DUPLICATE');
   assert.equal(duplicate.projectCopies[0].path, 'tools/hud/cli.mjs');
+});
+
+test('repeated sequence detection uses immutable adjacency and reports observed outcomes without creating workflows', () => {
+  const run = (id, name, status = 'pass') => ({
+    id, status, startedAt: `2026-08-26T00:00:${id}.000Z`,
+    operation: { type: 'repository-command', name, command: `run ${name}` },
+  });
+  const newestFirst = [
+    run('06', 'test'), run('05', 'build', 'fail'),
+    { id: 'barrier', status: 'pass' },
+    run('04', 'test'), run('03', 'build'),
+    run('02', 'test'), run('01', 'build'),
+  ];
+  const sequences = detectRepeatedOperationSequences(newestFirst, { maxLength: 2 });
+  const buildTest = sequences.find((item) => item.sequence.map((step) => step.key).join(',') === 'repository-command:build,repository-command:test');
+  assert.equal(buildTest.count, 3);
+  assert.equal(buildTest.passCount, 2);
+  assert.equal(buildTest.nonPassCount, 1);
+  assert.deepEqual(buildTest.occurrences[0].runIds, ['01', '02']);
+  assert.equal(sequences.some((item) => item.occurrences.some((occurrence) => occurrence.runIds.includes('barrier'))), false);
+  assert.throws(() => detectRepeatedOperationSequences([], { maxLength: 7 }), /bounds are invalid/);
 });
 
 test('filesystem comparison operation preserves exact identities and compact handoff in immutable evidence', async () => {
