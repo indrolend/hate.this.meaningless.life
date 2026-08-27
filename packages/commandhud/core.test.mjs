@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildCurrentOperationContext, buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, compareFilesystemFiles, continuation, currentState, detectRepeatedOperationSequences, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, gitSnapshot, inspectRuntimeAuthority, operationDetail, operationHistory, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
+import { buildCurrentOperationContext, buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, classifyPowerShellShellFailure, compareFilesystemFiles, continuation, currentState, detectRepeatedOperationSequences, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, gitSnapshot, inspectRuntimeAuthority, operationDetail, operationHistory, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -487,6 +487,34 @@ test('PowerShell unknown command is blocked but missing filesystem path is not',
     { stream: false },
   );
   assert.equal(ordinaryFailure.status, 'fail');
+});
+
+test('PowerShell surfaced command failures override a zero host exit without treating ordinary stderr as failure', async () => {
+  const diagnostic = "rg: The term 'rg' is not recognized as a name of a cmdlet, function, script file, or executable program.\nCommandNotFoundException";
+  assert.deepEqual(classifyPowerShellShellFailure(diagnostic), {
+    kind: 'command-not-found',
+    classification: 'environment',
+    message: "rg: The term 'rg' is not recognized as a name of a cmdlet, function, script file, or executable program.",
+  });
+  assert.equal(classifyPowerShellShellFailure('warning: optional cache is unavailable'), null);
+
+  const project = await fixtureProject();
+  const powershell = (await discoverShells(project.root)).find((entry) => entry.id === 'powershell');
+  if (!powershell.available) return;
+  const command = 'Get-ChildItem | commandhud-command-that-does-not-exist';
+  const record = await runTerminalCommand(project, command, { shell: 'powershell' });
+  assert.equal(record.exitCode, 0, 'the regression requires the observed zero-exit PowerShell host behavior');
+  assert.equal(record.status, 'fail');
+  assert.equal(record.operation.status, 'fail');
+  assert.equal(record.capturedFailure?.kind, 'command-not-found');
+  assert.equal(record.reduction.classification, 'environment');
+  assert.match(record.presentation.headline, /not recognized/i);
+  assert.match(readFileSync(record.stderrPath, 'utf8'), /CommandNotFoundException|not recognized/i);
+
+  const warning = await runTerminalCommand(project, "[Console]::Error.WriteLine('ordinary warning'); Write-Output ok", { shell: 'powershell' });
+  assert.equal(warning.exitCode, 0);
+  assert.equal(warning.status, 'pass');
+  assert.equal(warning.capturedFailure, null);
 });
 
 test('PowerShell CLIXML errors become ordinary readable text', () => {

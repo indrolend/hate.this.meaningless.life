@@ -761,6 +761,16 @@ export function reduceOutput(command, stdout, stderr, exitCode, { root = '', kin
   return { reducer: /npm/.test(command) ? 'npm' : /ctest/.test(command) ? 'ctest' : 'generic', summary, cause, classification, tail, markers };
 }
 
+export function classifyPowerShellShellFailure(stderr) {
+  const text = normalizeTerminalText(String(stderr || ''));
+  const commandNotFound = firstMatch(text, [
+    /[^\r\n]*The term '[^']+' is not recognized as a name of a cmdlet, function, script file, or executable program[^\r\n]*/i,
+    /[^\r\n]*CommandNotFoundException[^\r\n]*/i,
+  ]);
+  if (commandNotFound) return { kind: 'command-not-found', classification: 'environment', message: commandNotFound };
+  return null;
+}
+
 export function buildPresentation(record) {
   const summary = Array.isArray(record.reduction?.summary) ? record.reduction.summary.filter(Boolean) : [];
   const tail = Array.isArray(record.reduction?.tail) ? record.reduction.tail.filter(Boolean) : [];
@@ -771,7 +781,7 @@ export function buildPresentation(record) {
 
   if (record.status === 'interrupted') {
     headline = 'CommandHUD stopped before this operation completed.';
-  } else if (record.exitCode !== 0 && cause) {
+  } else if (cause) {
     headline = cause;
   } else if (summary.length) {
     headline = summary[0];
@@ -827,7 +837,7 @@ export async function runCommand(project, tokens, {
   acceptedExitCodes = [0], operationReducer = null, shell = true, captureDelta = false,
   signal = null, onStart = null, onOutput = null, operationIdentity = null,
   cwd = project.root, displayCommand = null, reductionKind = null, successMarkers = [], resultMarkers = false,
-  origin = 'core-api',
+  origin = 'core-api', classifyCapturedFailure = null,
 } = {}) {
   if (!tokens.length) throw new Error('hud run requires a command.');
   const origins = new Set(['core-api', 'cli-argv', 'terminal-ui', 'local-server']);
@@ -912,6 +922,11 @@ export async function runCommand(project, tokens, {
     gitSnapshot(project.root), repositoryCurrency(project.root, project.identity.id), captureDelta ? worktreeTree(project.root) : null,
   ]);
   const reduction = reduceOutput(command, stdout, stderr, exitCode, { root: project.root, kind: reductionKind, successMarkers, resultMarkers });
+  const capturedFailure = classifyCapturedFailure?.({ stdout, stderr, exitCode }) || null;
+  if (capturedFailure) {
+    reduction.cause ||= capturedFailure.message || 'The shell reported that the requested operation failed.';
+    reduction.classification ||= capturedFailure.classification || 'command';
+  }
   const missingCommand = exitCode !== 0 && /(?:command not found|is not recognized as (?:a name of |the name of )?a? ?(?:cmdlet|function|script file|executable program)|ENOENT)/i.test(normalizeTerminalText(`${stdout}\n${stderr}`));
   const accepted = acceptedExitCodes.includes(exitCode);
   const record = {
@@ -926,7 +941,8 @@ export async function runCommand(project, tokens, {
       count: Number.isInteger(workflow.count) ? workflow.count : null,
     } : null,
     startedAt: started.toISOString(), endedAt: ended.toISOString(), durationMs: ended - started,
-    exitCode, status: cancellationRequested ? 'cancelled' : accepted ? 'pass' : missingCommand ? 'blocked' : 'fail',
+    exitCode, status: cancellationRequested ? 'cancelled' : capturedFailure ? 'fail' : accepted ? 'pass' : missingCommand ? 'blocked' : 'fail',
+    capturedFailure,
     dirtyBefore: before.dirty, dirtyAfter: after.dirty,
     changedFiles: after.changedFiles, gitBefore: before, gitAfter: after,
     currencyBefore, currencyAfter,
@@ -1209,6 +1225,7 @@ export async function runTerminalCommand(project, command, {
       stream, shell: false, captureDelta: true, signal, onStart, onOutput,
       origin,
       cwd: selectedCwd, displayCommand: text,
+      classifyCapturedFailure: shell === 'powershell' ? ({ stderr }) => classifyPowerShellShellFailure(stderr) : null,
       operationIdentity: { type: 'terminal-command', shell, displayCommand: text, cwdBefore: selectedCwd },
       operationReducer: ({ exitCode, record }) => {
         let cwdAfter = selectedCwd;
