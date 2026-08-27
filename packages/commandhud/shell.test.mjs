@@ -4,7 +4,7 @@ import { execFileSync, spawnSync } from 'node:child_process';
 import { existsSync, mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { deliverShellResult, parseShellEvidenceCommand, renderShellEvidenceProjection, renderShellResult } from './shell.mjs';
+import { deliverShellResult, parseShellEvidenceCommand, renderShellEvidenceProjection, renderShellResult, shellInputIncomplete } from './shell.mjs';
 import { resolveProject } from './core.mjs';
 
 async function shellProject() {
@@ -35,6 +35,55 @@ test('terminal evidence projection keeps stream and factual line identity visibl
   });
   assert.match(rendered, /STDOUT · 1 matches\n7: needle/);
   assert.match(rendered, /STDERR · 0 matches\n\(no matching lines\)/);
+});
+
+test('PowerShell input completeness recognizes structural continuation without executing text', () => {
+  assert.equal(shellInputIncomplete('powershell', 'Write-Output ok'), false);
+  assert.equal(shellInputIncomplete('powershell', 'foreach ($x in 1,2) {'), true);
+  assert.equal(shellInputIncomplete('powershell', "foreach ($x in 1,2) {\n  Write-Output $x\n}"), false);
+  assert.equal(shellInputIncomplete('powershell', "Write-Output 'unfinished"), true);
+  assert.equal(shellInputIncomplete('powershell', 'Get-ChildItem |'), true);
+  assert.equal(shellInputIncomplete('powershell', 'Write-Output `'), true);
+  assert.equal(shellInputIncomplete('powershell', '<# unfinished'), true);
+  assert.equal(shellInputIncomplete('powershell', '@"\nhello'), true);
+  assert.equal(shellInputIncomplete('powershell', '@"\nhello\n"@'), false);
+  assert.equal(shellInputIncomplete('bash', 'if true; then'), false);
+});
+
+test('terminal shell records a pasted multiline PowerShell block as one operation and rejects incomplete EOF', {
+  skip: process.platform !== 'win32',
+}, () => {
+  const productRoot = resolve(import.meta.dirname, '..', '..');
+  const root = mkdtempSync(join(tmpdir(), 'commandhud-shell-multiline-'));
+  execFileSync('git', ['init', '-b', 'main'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'hud@example.invalid'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'HUD Test'], { cwd: root });
+  execFileSync('git', ['commit', '--allow-empty', '-m', 'fixture'], { cwd: root });
+  const stateRoot = join(root, '.state');
+  const script = `
+    import { PassThrough } from 'node:stream';
+    import { resolveProject } from ${JSON.stringify(new URL('./core.mjs', import.meta.url).href)};
+    import { startHudShell } from ${JSON.stringify(new URL('./shell.mjs', import.meta.url).href)};
+    const input = new PassThrough(); let output = '';
+    input.end(${JSON.stringify("foreach ($x in 1,2) {\n  Write-Output $x\n}\n/exit\n")});
+    const project = await resolveProject({ root: ${JSON.stringify(root)}, env: { ...process.env, HUD_STATE_ROOT: ${JSON.stringify(stateRoot)} } });
+    await startHudShell(project, { input, output: { write(value) { output += value; } }, clipboardWriter() {}, visual: false });
+    process.stdout.write(output);
+  `;
+  const result = spawnSync(process.execPath, ['--input-type=module', '-e', script], { cwd: productRoot, encoding: 'utf8', timeout: 15000 });
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  assert.match(result.stdout, /COMMAND foreach \(\$x in 1,2\) \{\n  Write-Output \$x\n\}/);
+  assert.match(result.stdout, /STDOUT_EXCERPT\n1\n2/);
+  assert.equal((result.stdout.match(/OPERATION TERMINAL-COMMAND/g) || []).length, 1);
+
+  const incompleteScript = script.replace(
+    JSON.stringify("foreach ($x in 1,2) {\n  Write-Output $x\n}\n/exit\n"),
+    JSON.stringify("foreach ($x in 1,2) {\n"),
+  );
+  const incomplete = spawnSync(process.execPath, ['--input-type=module', '-e', incompleteScript], { cwd: productRoot, encoding: 'utf8', timeout: 15000 });
+  assert.equal(incomplete.status, 0, incomplete.stderr || incomplete.stdout);
+  assert.match(incomplete.stdout, /INPUT_INCOMPLETE/);
+  assert.doesNotMatch(incomplete.stdout, /OPERATION TERMINAL-COMMAND/);
 });
 
 test('terminal shell renders compact measured context without replacing raw evidence', () => {

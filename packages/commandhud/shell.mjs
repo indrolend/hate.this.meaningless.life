@@ -21,6 +21,50 @@ function displayCwd(project, cwd) {
   return relative(project.root, cwd).replaceAll('\\', '/') || '.';
 }
 
+export function shellInputIncomplete(shell, value) {
+  if (shell !== 'powershell') return false;
+  const text = String(value || '').replace(/\r\n?/g, '\n');
+  const stack = [];
+  let quote = null;
+  let blockComment = false;
+  let hereString = null;
+  const pairs = { '(': ')', '[': ']', '{': '}' };
+  const closing = new Set(Object.values(pairs));
+  const lines = text.split('\n');
+  for (const line of lines) {
+    if (hereString) {
+      if (line.trim() === `${hereString}@`) hereString = null;
+      continue;
+    }
+    for (let index = 0; index < line.length; index++) {
+      const character = line[index];
+      const next = line[index + 1];
+      if (blockComment) {
+        if (character === '#' && next === '>') { blockComment = false; index++; }
+        continue;
+      }
+      if (quote) {
+        if (quote === "'" && character === "'" && next === "'") { index++; continue; }
+        if (quote === '"' && character === '`') { index++; continue; }
+        if (character === quote) quote = null;
+        continue;
+      }
+      if (character === '<' && next === '#') { blockComment = true; index++; continue; }
+      if (character === '#') break;
+      if (character === '@' && (next === '"' || next === "'") && !line.slice(index + 2).trim()) {
+        hereString = next;
+        break;
+      }
+      if (character === '"' || character === "'") { quote = character; continue; }
+      if (character === '`') { index++; continue; }
+      if (pairs[character]) stack.push(pairs[character]);
+      else if (closing.has(character) && stack.at(-1) === character) stack.pop();
+    }
+  }
+  const tail = lines.at(-1).trimEnd();
+  return Boolean(hereString || blockComment || quote || stack.length || /(?:`|\||,)\s*$/.test(tail));
+}
+
 export function parseShellEvidenceCommand(command, fallbackRunId) {
   const match = String(command || '').match(/^\/(raw|head|tail|find|around)(?:\s+(.*))?$/);
   if (!match) return null;
@@ -137,7 +181,7 @@ export async function startHudShell(project, {
     filteredInput.setRawMode = (mode) => input.setRawMode?.(mode);
   }
   const terminal = createInterface({ input: filteredInput, output, terminal: interactive });
-  const pipedCommands = interactive ? null : terminal[Symbol.asyncIterator]();
+  const commandLines = terminal[Symbol.asyncIterator]();
   if (layout.active === false && interactive && tui) layout.start();
   if (!layout.active) {
     output.write(`${IDLE_FACE} hate.this.meaningless.life · context condenser\n`);
@@ -145,7 +189,6 @@ export async function startHudShell(project, {
   }
 
   const show = (value) => layout.active ? layout.renderOutput(String(value).trimEnd()) : output.write(value);
-  let currentPrompt = '';
 
   const inputHandler = (chunk) => {
     if (!layout.active) return;
@@ -175,19 +218,40 @@ export async function startHudShell(project, {
       try {
         if (interactive) {
           const prompt = layout.active ? '> ' : '> ';
-          currentPrompt = prompt;
           if (layout.active) layout.placePrompt(prompt);
-          command = await terminal.question(layout.active ? '' : prompt);
-          layout.clearPrompt();
+          else output.write(prompt);
         }
-        else {
-          const next = await pipedCommands.next();
-          if (next.done) break;
-          command = next.value;
-          output.write(`${shell.id} ${displayCwd(project, cwd)}> ${command}\n`);
-        }
+        const next = await commandLines.next();
+        if (layout.active) layout.clearPrompt();
+        if (next.done) break;
+        command = next.value;
+        if (!interactive) output.write(`${shell.id} ${displayCwd(project, cwd)}> ${command}\n`);
       }
       catch { break; }
+      while (shellInputIncomplete(shell.id, command)) {
+        let continuation = null;
+        try {
+          if (interactive && layout.active) layout.placePrompt('... ');
+          else if (interactive) output.write('... ');
+          const next = await commandLines.next();
+          if (layout.active) layout.clearPrompt();
+          if (!next.done) {
+            continuation = next.value;
+            if (!interactive) output.write(`... ${continuation}\n`);
+          }
+        } catch {}
+        if (continuation === null) {
+          show('INPUT_INCOMPLETE\nPowerShell block ended before its syntax was complete. Nothing was executed.\n\n');
+          command = '';
+          break;
+        }
+        command += `\n${continuation}`;
+        if (command.length > 32 * 1024) {
+          show('INPUT_REJECTED\nMultiline command exceeds 32 KiB. Nothing was executed.\n\n');
+          command = '';
+          break;
+        }
+      }
       command = command.trim();
       if (!command) continue;
       if (command === '/exit' || command === '/quit') break;
