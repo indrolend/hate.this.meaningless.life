@@ -20,9 +20,15 @@ test('terminal evidence commands target the latest or an explicit immutable run'
   const runId = '20260826010101-abcd';
   const older = '20260825020202-1234';
   assert.deepEqual(parseShellEvidenceCommand('/head 12', runId), { runId, mode: 'head', count: '12' });
+  assert.deepEqual(parseShellEvidenceCommand(`/head ${older} 5`, runId), { runId: older, mode: 'head', count: '5' });
+  assert.deepEqual(parseShellEvidenceCommand(`/head 5 ${older}`, runId), { runId: older, mode: 'head', count: '5' });
   assert.deepEqual(parseShellEvidenceCommand(`/tail ${older} 5`, runId), { runId: older, mode: 'tail', count: '5' });
+  assert.deepEqual(parseShellEvidenceCommand(`/find ${older} exact useful text`, runId), { runId: older, mode: 'find', pattern: 'exact useful text' });
   assert.deepEqual(parseShellEvidenceCommand('/find exact useful text', runId), { runId, mode: 'find', pattern: 'exact useful text' });
   assert.deepEqual(parseShellEvidenceCommand(`/around ${older} failure 3`, runId), { runId: older, mode: 'around', pattern: 'failure', context: '3' });
+  assert.deepEqual(parseShellEvidenceCommand(`/raw ${older}`, runId), { runId: older, mode: 'raw' });
+  assert.throws(() => parseShellEvidenceCommand(`/head ${older} 5 extra`, runId), /Syntax/);
+  assert.throws(() => parseShellEvidenceCommand('/find', runId), /Syntax/);
   assert.throws(() => parseShellEvidenceCommand('/raw', null), /No command has been recorded/);
 });
 

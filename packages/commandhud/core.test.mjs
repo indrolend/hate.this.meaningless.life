@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildCurrentOperationContext, buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, classifyPowerShellShellFailure, compareFilesystemFiles, continuation, currentState, detectRepeatedOperationSequences, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, gitSnapshot, inspectRuntimeAuthority, lintRepository, listRuns, operationDetail, operationHistory, parseLintDiagnostics, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
+import { buildCurrentOperationContext, buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, classifyPowerShellShellFailure, classifyProofCurrency, compareFilesystemFiles, continuation, currentState, detectRepeatedOperationSequences, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, formatRepositoryCommandProof, gitSnapshot, inspectRuntimeAuthority, lintRepository, listRuns, operationDetail, operationHistory, parseLintDiagnostics, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCommandProof, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -22,6 +22,21 @@ function fixture() {
 function fixtureProject() {
   const root = fixture();
   return resolveProject({ cwd: root, env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'hud-state-')) } });
+}
+
+async function proofFixtureProject() {
+  const root = fixture();
+  const identityPath = join(root, 'distribution', 'project.json');
+  const identity = JSON.parse(readFileSync(identityPath, 'utf8'));
+  identity.commandHud = { commands: [{
+    name: 'verify', command: 'node -e "console.log(\'VERIFY=PASS\')"',
+    argv: [process.execPath, '-e', "console.log('VERIFY=PASS')"], resultMarkers: true,
+  }] };
+  writeFileSync(identityPath, JSON.stringify(identity, null, 2));
+  writeFileSync(join(root, '.gitignore'), 'ignored-proof.txt\n');
+  execFileSync('git', ['add', '.'], { cwd: root });
+  execFileSync('git', ['commit', '-m', 'declare verification'], { cwd: root });
+  return resolveProject({ root, env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'hud-proof-state-')) } });
 }
 
 test('recorded evidence supports raw and bounded projections without rerunning', async () => {
@@ -347,6 +362,73 @@ test('repository command execution resolves a current discovered identity and re
   assert.equal(readProjectState(project).lastRunId, redo.id);
 });
 
+test('repository proof reuses exact-byte evidence across commit identity without creating a run', async () => {
+  const project = await proofFixtureProject();
+  assert.equal(classifyProofCurrency({ project: project.identity.id, worktreeFingerprint: 'sha256:a' }, { project: project.identity.id, worktreeFingerprint: 'sha256:a' }), 'CURRENT');
+  assert.equal(classifyProofCurrency({ project: 'different/project', worktreeFingerprint: 'sha256:a' }, { project: project.identity.id, worktreeFingerprint: 'sha256:a' }), 'STALE');
+  assert.equal(classifyProofCurrency(null, await repositoryCurrency(project.root, project.identity.id)), 'UNKNOWN');
+
+  writeFileSync(join(project.root, 'file.txt'), 'verified bytes\n');
+  const record = await runRepositoryCommand(project, 'verify');
+  const recordedHead = record.currencyAfter.head;
+  execFileSync('git', ['add', 'file.txt'], { cwd: project.root });
+  execFileSync('git', ['commit', '-m', 'commit verified bytes'], { cwd: project.root });
+  const countBefore = listRuns(project, Number.MAX_SAFE_INTEGER).length;
+  const proof = await repositoryCommandProof(project, 'verify');
+  assert.equal(proof.state, 'CURRENT');
+  assert.equal(proof.reusable, true);
+  assert.equal(proof.runId, record.id);
+  assert.equal(proof.currency.recordedHead, recordedHead);
+  assert.notEqual(proof.currency.currentHead, recordedHead);
+  assert.equal(proof.currency.headChanged, true);
+  assert.equal(proof.currency.recordedFingerprint, proof.currency.currentFingerprint);
+  assert.equal(proof.raw.stdout, record.stdoutPath);
+  assert.equal(listRuns(project, Number.MAX_SAFE_INTEGER).length, countBefore);
+  assert.match(formatRepositoryCommandProof(proof), new RegExp(`PROOF CURRENT[\\s\\S]*RUN ${record.id}[\\s\\S]*HEAD_CHANGED true[\\s\\S]*RAW run:${record.id}`));
+
+  writeFileSync(join(project.root, 'file.txt'), 'different bytes\n');
+  assert.equal((await repositoryCommandProof(project, 'verify')).state, 'STALE');
+  writeFileSync(join(project.root, 'file.txt'), 'verified bytes\n');
+  assert.equal((await repositoryCommandProof(project, 'verify')).state, 'CURRENT');
+  writeFileSync(join(project.root, 'untracked-proof.txt'), 'new input\n');
+  assert.equal((await repositoryCommandProof(project, 'verify')).state, 'STALE');
+  rmSync(join(project.root, 'untracked-proof.txt'));
+  writeFileSync(join(project.root, 'ignored-proof.txt'), 'ignored output\n');
+  assert.equal((await repositoryCommandProof(project, 'verify')).state, 'CURRENT');
+  rmSync(join(project.root, 'ignored-proof.txt'));
+  assert.equal(execFileSync('git', ['status', '--short'], { cwd: project.root, encoding: 'utf8' }), '');
+  await assert.rejects(() => repositoryCommandProof(project, 'verify-typo'), /Unknown repository command/);
+});
+
+test('repository proof fails closed for failed attempts and missing raw evidence', async () => {
+  const failedProject = await proofFixtureProject();
+  const identityPath = join(failedProject.root, 'distribution', 'project.json');
+  const identity = JSON.parse(readFileSync(identityPath, 'utf8'));
+  identity.commandHud.commands[0].command = 'node -e "process.exit(require(\'node:fs\').existsSync(\'ignored-proof.txt\') ? 7 : 0)"';
+  identity.commandHud.commands[0].argv = [process.execPath, '-e', "process.exit(require('node:fs').existsSync('ignored-proof.txt') ? 7 : 0)"];
+  writeFileSync(identityPath, JSON.stringify(identity, null, 2));
+  execFileSync('git', ['add', 'distribution/project.json'], { cwd: failedProject.root });
+  execFileSync('git', ['commit', '-m', 'declare state-controlled verifier'], { cwd: failedProject.root });
+  const olderPass = await runRepositoryCommand(failedProject, 'verify');
+  assert.equal(olderPass.status, 'pass');
+  writeFileSync(join(failedProject.root, 'ignored-proof.txt'), 'external test state\n');
+  const failure = await runRepositoryCommand(failedProject, 'verify');
+  assert.equal(failure.status, 'fail');
+  assert.equal(failure.currencyAfter.worktreeFingerprint, olderPass.currencyAfter.worktreeFingerprint);
+  const failedProof = await repositoryCommandProof(failedProject, 'verify');
+  assert.equal(failedProof.state, 'MISSING');
+  assert.equal(failedProof.reusable, false);
+  assert.equal(failedProof.runId, failure.id);
+  assert.match(failedProof.reason, /newest retained attempt.*fail/i);
+
+  const incompleteProject = await proofFixtureProject();
+  const pass = await runRepositoryCommand(incompleteProject, 'verify');
+  rmSync(pass.stderrPath);
+  const incomplete = await repositoryCommandProof(incompleteProject, 'verify');
+  assert.equal(incomplete.state, 'MISSING');
+  assert.equal(incomplete.reusable, false);
+});
+
 test('lint diagnostics retain only factual repository-contained file locations', () => {
   const root = mkdtempSync(join(tmpdir(), 'hud-lint-diagnostics-'));
   mkdirSync(join(root, 'src'));
@@ -565,6 +647,16 @@ test('PowerShell surfaced command failures override a zero host exit without tre
   assert.equal(warning.exitCode, 0);
   assert.equal(warning.status, 'pass');
   assert.equal(warning.capturedFailure, null);
+
+  const nativeFatal = await runTerminalCommand(project, `node -e "throw new Error('COMMANDHUD_TEST_FATAL')"`, { shell: 'powershell' });
+  assert.notEqual(nativeFatal.exitCode, 0);
+  assert.equal(nativeFatal.status, 'fail');
+  assert.equal(nativeFatal.operation.status, 'fail');
+  assert.match(readFileSync(nativeFatal.stderrPath, 'utf8'), /COMMANDHUD_TEST_FATAL/);
+
+  const nativeWarning = await runTerminalCommand(project, `node -e "console.error('ordinary warning'); console.log('ok')"`, { shell: 'powershell' });
+  assert.equal(nativeWarning.exitCode, 0);
+  assert.equal(nativeWarning.status, 'pass');
 });
 
 test('PowerShell CLIXML errors become ordinary readable text', () => {

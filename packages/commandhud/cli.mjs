@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { formatPacket, resolveProject, gitSnapshot, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, lintRepository, runCommand, runRepositoryCommand, searchRepository, buildCurrentOperationContext, filesystemIdentity, inspectRuntimeAuthority, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, repeatedOperationSequences, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { formatPacket, formatRepositoryCommandProof, resolveProject, gitSnapshot, repositoryCommandProof, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, lintRepository, runCommand, runRepositoryCommand, searchRepository, buildCurrentOperationContext, filesystemIdentity, inspectRuntimeAuthority, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, repeatedOperationSequences, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 const HELP = `hate.this.meaningless.life · context condenser
 
@@ -14,6 +14,7 @@ Run from any Git repository:
   hud lint                          run the repository-declared lint authority
   hud tools                         discovered tools and repository commands
   hud repository-command <name>    run a repository-owned typed command
+  hud proof <name>                 reuse current successful evidence without executing
 
 Retained evidence (never reruns the command):
   hud history [count]
@@ -321,6 +322,15 @@ async function main() {
       console.log(`RAW run:${record.id}`);
     }
     process.exitCode = record.status === 'pass' ? 0 : record.status === 'blocked' ? 2 : 1;
+    return;
+  }
+  if (command === 'proof') {
+    const name = args[0];
+    if (!name || args.length !== 1) throw new Error('hud proof requires exactly one discovered repository command name.');
+    const proof = await repositoryCommandProof(project, name);
+    if (options.json) console.log(JSON.stringify(proof, null, 2));
+    else console.log(formatRepositoryCommandProof(proof));
+    process.exitCode = proof.state === 'CURRENT' ? 0 : proof.state === 'STALE' ? 1 : 2;
     return;
   }
   if (command === 'lint') {

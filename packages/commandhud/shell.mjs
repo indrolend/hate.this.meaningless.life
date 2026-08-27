@@ -74,12 +74,29 @@ export function parseShellEvidenceCommand(command, fallbackRunId) {
   if (!match) return null;
   const mode = match[1];
   const parts = match[2]?.trim().split(/\s+/).filter(Boolean) || [];
-  const runId = /^\d{14}-[0-9a-f]{4}$/i.test(parts[0] || '') ? parts.shift() : fallbackRunId;
+  const isRunId = (value) => /^\d{14}-[0-9a-f]{4}$/i.test(value || '');
+  let runId = isRunId(parts[0]) ? parts.shift() : fallbackRunId;
+  if ((mode === 'head' || mode === 'tail') && /^\d+$/.test(parts[0] || '') && isRunId(parts[1])) {
+    const count = parts.shift();
+    runId = parts.shift();
+    if (parts.length) throw new Error(`Syntax: /${mode} <run> [count]`);
+    return { runId, mode, count };
+  }
   if (!runId) throw new Error('No command has been recorded yet.');
-  if (mode === 'raw') return { runId, mode };
-  if (mode === 'head' || mode === 'tail') return { runId, mode, count: parts[0] };
-  if (mode === 'find') return { runId, mode, pattern: parts.join(' ') };
+  if (mode === 'raw') {
+    if (parts.length) throw new Error('Syntax: /raw <run>');
+    return { runId, mode };
+  }
+  if (mode === 'head' || mode === 'tail') {
+    if (parts.length > 1 || (parts[0] && !/^\d+$/.test(parts[0]))) throw new Error(`Syntax: /${mode} <run> [count]`);
+    return { runId, mode, count: parts[0] };
+  }
+  if (mode === 'find') {
+    if (!parts.length) throw new Error('Syntax: /find <run> <pattern>');
+    return { runId, mode, pattern: parts.join(' ') };
+  }
   const context = /^\d+$/.test(parts.at(-1) || '') ? parts.pop() : undefined;
+  if (!parts.length) throw new Error('Syntax: /around <run> <pattern> [lines]');
   return { runId, mode, pattern: parts.join(' '), context };
 }
 

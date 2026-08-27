@@ -277,6 +277,12 @@ export function classifyEvidence(recordCurrency, currentCurrency) {
   return recordCurrency.worktreeFingerprint === currentCurrency.worktreeFingerprint ? 'CURRENT' : 'STALE';
 }
 
+export function classifyProofCurrency(recordCurrency, currentCurrency) {
+  if (!recordCurrency?.project || !recordCurrency?.worktreeFingerprint || !currentCurrency?.project || !currentCurrency?.worktreeFingerprint) return 'UNKNOWN';
+  if (recordCurrency.project !== currentCurrency.project) return 'STALE';
+  return recordCurrency.worktreeFingerprint === currentCurrency.worktreeFingerprint ? 'CURRENT' : 'STALE';
+}
+
 function fileSha256(path) {
   const hash = createHash('sha256');
   const descriptor = openSync(path, 'r');
@@ -1258,7 +1264,7 @@ export async function runTerminalCommand(project, command, {
   let tokens;
   if (shell === 'powershell') {
     const quotedCwdPath = cwdPath.replaceAll("'", "''");
-    const script = `& { ${text}\n}; $hudExit = if ($?) { 0 } elseif ($LASTEXITCODE -is [int]) { $LASTEXITCODE } else { 1 }; (Get-Location).ProviderPath | Set-Content -LiteralPath '${quotedCwdPath}' -NoNewline -Encoding utf8; exit $hudExit`;
+    const script = `$global:LASTEXITCODE = 0; & { ${text}\n}; $hudSucceeded = $?; $hudNativeExit = $LASTEXITCODE; $hudExit = if ($hudNativeExit -is [int] -and $hudNativeExit -ne 0) { $hudNativeExit } elseif ($hudSucceeded) { 0 } else { 1 }; (Get-Location).ProviderPath | Set-Content -LiteralPath '${quotedCwdPath}' -NoNewline -Encoding utf8; exit $hudExit`;
     tokens = [selected.executable, '-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', Buffer.from(script, 'utf16le').toString('base64')];
   } else if (shell === 'bash') {
     if (selected.executable.toLowerCase().endsWith('wsl.exe')) {
@@ -1677,6 +1683,69 @@ export function listRuns(project, limit = 10) {
   if (state?.lastRunId) ids.push(state.lastRunId);
   for (const id of readdirSync(root).sort().reverse()) if (!ids.includes(id)) ids.push(id);
   return ids.slice(0, limit).map((id) => readJson(join(root, id, 'run.json'))).filter(Boolean);
+}
+
+function proofFromRecord(command, state, reusable, record, currentCurrency, classification, reason) {
+  const recorded = record?.currencyAfter || null;
+  return {
+    command,
+    state,
+    reusable,
+    runId: record?.id || null,
+    recordedStatus: record?.status || null,
+    reason: reason || null,
+    currency: {
+      recordedHead: recorded?.head || null,
+      currentHead: currentCurrency.head,
+      recordedFingerprint: recorded?.worktreeFingerprint || null,
+      currentFingerprint: currentCurrency.worktreeFingerprint,
+      headChanged: Boolean(recorded?.head && recorded.head !== currentCurrency.head),
+      classification,
+    },
+    raw: { stdout: record?.stdoutPath || null, stderr: record?.stderrPath || null },
+    startedAt: record?.startedAt || null,
+    endedAt: record?.endedAt || null,
+    durationMs: record?.durationMs ?? null,
+  };
+}
+
+export async function repositoryCommandProof(project, name) {
+  const command = String(name || '');
+  if (!discoverCommands(project.root).some((entry) => entry.name === command)) throw new Error(`Unknown repository command: ${command}`);
+  const currentCurrency = await repositoryCurrency(project.root, project.identity.id);
+  const matching = listRuns(project, Number.MAX_SAFE_INTEGER).filter((record) =>
+    record.operation?.type === 'repository-command' && record.operation.name === command);
+  if (!matching.length) return proofFromRecord(command, 'MISSING', false, null, currentCurrency, 'UNKNOWN', 'No retained attempt exists for this command.');
+  const classification = (record) => classifyProofCurrency(record.currencyAfter, currentCurrency);
+  const currentAttempt = matching.find((record) => classification(record) === 'CURRENT');
+  if (currentAttempt) {
+    const completePass = currentAttempt.status === 'pass' && currentAttempt.operation?.status === 'pass' &&
+      existsSync(currentAttempt.stdoutPath || '') && existsSync(currentAttempt.stderrPath || '');
+    if (completePass) return proofFromRecord(command, 'CURRENT', true, currentAttempt, currentCurrency, 'CURRENT', null);
+    return proofFromRecord(command, 'MISSING', false, currentAttempt, currentCurrency, 'CURRENT',
+      `The newest retained attempt for current bytes is ${currentAttempt.status || 'invalid'}.`);
+  }
+  const successful = matching.find((record) => record.status === 'pass' && record.operation?.status === 'pass');
+  if (successful) {
+    const value = classification(successful);
+    return proofFromRecord(command, 'STALE', false, successful, currentCurrency, value,
+      value === 'UNKNOWN' ? 'Retained proof currency is incomplete.' : 'Repository bytes changed.');
+  }
+  const newest = matching[0];
+  return proofFromRecord(command, 'MISSING', false, newest, currentCurrency, classification(newest), 'No successful retained attempt exists for this command.');
+}
+
+export function formatRepositoryCommandProof(proof) {
+  const lines = [`PROOF ${proof.state}`, `COMMAND ${proof.command}`];
+  if (proof.recordedStatus) lines.push(`STATUS ${proof.recordedStatus.toUpperCase()}`);
+  if (proof.runId) lines.push(`RUN ${proof.runId}`);
+  if (proof.state === 'CURRENT') lines.push('EVIDENCE WORKTREE MATCH');
+  if (proof.reason) lines.push(`REASON ${proof.reason}`);
+  if (proof.currency.recordedHead) lines.push(`RECORDED_HEAD ${proof.currency.recordedHead.slice(0, 7)}`);
+  lines.push(`CURRENT_HEAD ${proof.currency.currentHead.slice(0, 7)}`);
+  lines.push(`HEAD_CHANGED ${proof.currency.headChanged}`);
+  if (proof.runId) lines.push(`RAW run:${proof.runId}`);
+  return lines.join('\n');
 }
 
 export function operationSequenceIdentity(record) {
