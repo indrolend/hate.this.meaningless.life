@@ -1,11 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { deliverShellProjection, deliverShellResult, encodeClipboardInput, parseShellEvidenceCommand, renderShellEvidenceProjection, renderShellResult, shellInputIncomplete } from './shell.mjs';
-import { resolveProject } from './core.mjs';
+import { PassThrough } from 'node:stream';
+import { deliverShellProjection, deliverShellResult, encodeClipboardInput, parseShellEvidenceCommand, renderShellEvidenceProjection, renderShellResult, shellInputIncomplete, startHudShell } from './shell.mjs';
+import { listRuns, resolveProject, runRepositoryCommand } from './core.mjs';
 
 async function shellProject() {
   const root = mkdtempSync(join(tmpdir(), 'commandhud-shell-project-'));
@@ -31,6 +32,39 @@ test('terminal evidence commands target the latest or an explicit immutable run'
   assert.throws(() => parseShellEvidenceCommand('/find', runId), /Syntax/);
   assert.throws(() => parseShellEvidenceCommand('/raw', null), /No command has been recorded/);
 });
+
+test('terminal proof reuses and copies retained evidence without creating an outer run', async () => {
+  const root = mkdtempSync(join(tmpdir(), 'commandhud-shell-proof-'));
+  execFileSync('git', ['init', '-b', 'main'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'hud@example.invalid'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'HUD Test'], { cwd: root });
+  const distribution = join(root, 'distribution');
+  mkdirSync(distribution);
+  writeFileSync(join(distribution, 'project.json'), JSON.stringify({
+    id: 'fixture/shell-proof', commandHud: { commands: [{
+      name: 'verify', command: 'node -e pass', argv: [process.execPath, '-e', "console.log('PASS')"],
+    }] },
+  }));
+  execFileSync('git', ['add', '.'], { cwd: root });
+  execFileSync('git', ['commit', '-m', 'fixture'], { cwd: root });
+  const project = await resolveProject({ root, env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'commandhud-shell-proof-state-')) } });
+  const record = await runRepositoryCommand(project, 'verify');
+  const before = listRuns(project, Number.MAX_SAFE_INTEGER).length;
+  const input = new PassThrough();
+  input.end('/proof verify\n/exit\n');
+  let output = '';
+  const copies = [];
+  await startHudShell(project, { input, output: { write(value) { output += value; } }, clipboardWriter(value) { copies.push(value); }, visual: false });
+  assert.equal(listRuns(project, Number.MAX_SAFE_INTEGER).length, before);
+  assert.match(output, new RegExp(`PROOF CURRENT[\\s\\S]*RUN ${record.id}`));
+  assert.match(output, /COPIED proof:verify/);
+  assert.equal(copies.length, 1);
+  assert.equal(copies[0], formatProofOutput(output));
+});
+
+function formatProofOutput(output) {
+  return output.match(/PROOF CURRENT[\s\S]*?RAW run:[^\r\n]+/)?.[0] || '';
+}
 
 test('terminal evidence projection keeps stream and factual line identity visible', () => {
   const rendered = renderShellEvidenceProjection({

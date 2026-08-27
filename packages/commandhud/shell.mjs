@@ -3,7 +3,7 @@ import { basename, relative } from 'node:path';
 import { createInterface } from 'node:readline/promises';
 import { PassThrough } from 'node:stream';
 import {
-  buildCurrentOperationContext, buildOperationContext, diffRunEvidence, discoverShells, lastRun, listRuns, projectRunEvidence, runById,
+  buildCurrentOperationContext, buildOperationContext, diffRunEvidence, discoverShells, formatRepositoryCommandProof, lastRun, listRuns, projectRunEvidence, repositoryCommandProof, runById,
   runTerminalCommand, undoOperation, undoPlan,
 } from './core.mjs';
 import { createShellVisualStatus, IDLE_FACE, visualMotionEnabled } from './shell-visual.mjs';
@@ -163,6 +163,7 @@ function help() {
     '/diff <run> <run>  compare two retained stdout/stderr records',
     'Add a run ID after the command to inspect an older run.',
     '/history [n]   list a bounded number of recorded operations',
+    '/proof <name>  reuse current repository-command evidence without executing',
     '/undo          inspect the latest command for safe Undo',
     '/undo <run>    apply a previously inspected safe Undo',
     '/shell <id>    switch to powershell, bash, or cmd',
@@ -295,6 +296,17 @@ export async function startHudShell(project, {
         const selected = available.find((entry) => entry.id === id && entry.available);
         if (!selected) show(`Unavailable shell: ${id || '(missing)'}\n\n`);
         else { shell = selected; layout.updateShell(shell.label); show(`SHELL ${shell.label}\n\n`); }
+        continue;
+      }
+      if (/^\/proof(?:\s|$)/.test(command)) {
+        const parts = command.split(/\s+/).filter(Boolean);
+        if (parts.length !== 2) show('/proof requires exactly one repository command name.\n\n');
+        else {
+          try {
+            const proof = await repositoryCommandProof(project, parts[1]);
+            deliverShellProjection(formatRepositoryCommandProof(proof), show, clipboardWriter, `proof:${parts[1]}`);
+          } catch (error) { show(`${error.message}\n\n`); }
+        }
         continue;
       }
       const previous = lastRun(project);
