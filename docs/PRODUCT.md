@@ -22,8 +22,9 @@ LLM command
 
 | Interface | Purpose |
 | --- | --- |
-| `hud shell` | primary fixed terminal UI and context-condenser loop |
-| `hud desktop` | Windows local application window with repository map and trusted terminal capability |
+| `hud shell` | primary plain terminal and context-condenser loop |
+| `hud tui` | primary fixed terminal UI over the same shell client |
+| `hud desktop` | Windows Repository Map application with trusted terminal capability |
 | `hud serve` | local visual client without arbitrary shell-over-HTTP |
 | `hud <operation>` | first-class CLI for state, Search, commands, history, handoff, workflows, and Undo |
 

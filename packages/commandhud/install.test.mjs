@@ -1,9 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { execFileSync, spawnSync } from 'node:child_process';
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join, resolve } from 'node:path';
+
+test('repository root is the only package installation authority', () => {
+  const productRoot = resolve(import.meta.dirname, '..', '..');
+  const product = JSON.parse(readFileSync(join(productRoot, 'package.json'), 'utf8'));
+  const runtime = JSON.parse(readFileSync(join(import.meta.dirname, 'package.json'), 'utf8'));
+  assert.deepEqual(product.bin, {
+    hud: './packages/commandhud/cli.mjs',
+    commandhud: './packages/commandhud/cli.mjs',
+  });
+  assert.equal(runtime.bin, undefined);
+});
 
 test('a local product clone installs one portable hud command that attaches to another repository', () => {
   const productRoot = resolve(import.meta.dirname, '..', '..');

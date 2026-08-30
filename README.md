@@ -26,19 +26,29 @@ Earlier Windows Forms, DataFactory/VS Code, and portable distribution prototypes
 
 ## Use it now
 
-From the Git repository you want to operate on:
+From the Git repository you want to operate on, launch the fixed terminal UI:
 
 ```powershell
-& 'C:\path\to\hate.this.meaningless.life\CommandHUD Shell.cmd'
+& 'C:\path\to\hate.this.meaningless.life\CommandHUD-TUI.cmd'
 ```
 
 The launcher attaches to the current Git repository. Paste an ordinary command at the prompt; the full output is retained and the condensed result is shown and copied automatically.
 
-Open the visual desktop client from the current repository:
+Open the Repository Map desktop client from the current repository:
 
 ```powershell
-C:\path\to\hate.this.meaningless.life\CommandHUD.cmd
+& 'C:\path\to\hate.this.meaningless.life\CommandHUD-Desktop.cmd'
 ```
+
+`CommandHUD.cmd` is the Windows compatibility launcher for the complete CLI. Select clients explicitly:
+
+```powershell
+& 'C:\path\to\hate.this.meaningless.life\CommandHUD.cmd' tui
+& 'C:\path\to\hate.this.meaningless.life\CommandHUD.cmd' shell
+& 'C:\path\to\hate.this.meaningless.life\CommandHUD.cmd' desktop
+```
+
+All launchers use the current directory as the default Git root and preserve `--root <path>` and other client arguments. With no command, `CommandHUD.cmd` has the same context behavior as `hud` and `commandhud`. The historical `CommandHUD Shell.cmd` filename remains a compatibility alias for the plain shell; quote its path when invoking it from PowerShell.
 
 Use the product CLI directly:
 
@@ -57,10 +67,13 @@ Then every Git checkout has the same access point:
 
 ```powershell
 hud shell
+hud tui
 hud desktop
 hud state --json
 hud search currentState tools
 ```
+
+`hud` is the canonical installed name. `commandhud` remains an equivalent compatibility alias; both are generated from the repository-root package and execute the same `packages/commandhud/cli.mjs` authority.
 
 ## Project identity
 

@@ -39,7 +39,11 @@ Each record carries project identity, root, branch, commit, command, exit status
 | Path | Classification |
 | --- | --- |
 | `packages/commandhud/` | current product authority |
-| root `hud.cmd` and `CommandHUD*.cmd` | current Windows front doors |
+| `packages/commandhud/repository-map-client/` | current browser renderer; client only, not semantic authority |
+| root `hud.cmd` | argument-preserving CLI front door |
+| `CommandHUD.cmd` | Windows compatibility launcher for the complete CLI |
+| `CommandHUD-TUI.cmd` and `CommandHUD-Desktop.cmd` | unambiguous Windows client launchers |
+| `CommandHUD Shell.cmd` | quoted compatibility alias for the plain shell |
 | `docs/PROTOTYPE-RETIREMENT-AUDIT.md` | behavioral accounting for removed prototype lineages |
 
 Retired source remains available through Git history. Do not restore it to the active tree unless a demonstrated current contract cannot be implemented through the canonical runtime.

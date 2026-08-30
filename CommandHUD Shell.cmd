@@ -1,9 +1,6 @@
 @echo off
 setlocal
 title CommandHUD Shell
-where node.exe >nul 2>nul || (
-  echo CommandHUD needs Node.js. Install Node.js and reopen this launcher.
-  exit /b 1
-)
-node "%~dp0packages\commandhud\cli.mjs" shell --root "%CD%"
+rem Compatibility alias. Prefer CommandHUD-TUI.cmd or CommandHUD.cmd shell.
+call "%~dp0CommandHUD.cmd" shell %*
 exit /b %ERRORLEVEL%

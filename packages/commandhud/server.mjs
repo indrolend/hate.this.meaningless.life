@@ -4,7 +4,7 @@ import { dirname, extname, join, normalize, relative, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url';
 import { buildCurrentOperationContext, classifyEvidence, currentState, discoverShells, lastRun, lintRepository, operationDetail, operationHistory, recoverInterruptedRuns, repositoryCurrency, repositoryTree, runById, runRepositoryCommand, runTerminalCommand, searchRepository, undoOperation, undoPlan } from './core.mjs';
 
-const staticRoot = join(dirname(fileURLToPath(import.meta.url)), 'visual-prototype');
+const staticRoot = join(dirname(fileURLToPath(import.meta.url)), 'repository-map-client');
 const contentTypes = {
   '.html': 'text/html; charset=utf-8', '.js': 'text/javascript; charset=utf-8',
   '.json': 'application/json; charset=utf-8', '.css': 'text/css; charset=utf-8',

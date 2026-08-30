@@ -27,6 +27,95 @@ for (const command of ['help', '--help', '-h']) {
   });
 }
 
+test('client routes reject unknown, missing, irrelevant, and positional arguments', () => {
+  const root = mkdtempSync(join(tmpdir(), 'commandhud-client-route-'));
+  try {
+    execFileSync('git', ['init', '-b', 'main'], { cwd: root, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'hud@example.invalid'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'HUD Test'], { cwd: root });
+    execFileSync('git', ['commit', '--allow-empty', '-m', 'fixture'], { cwd: root, stdio: 'pipe' });
+    const run = (args) => spawnSync(process.execPath, [cli, ...args], {
+      cwd: root, encoding: 'utf8', timeout: 10_000,
+    });
+    const unknown = run(['state', '--definitely-unknown']);
+    assert.notEqual(unknown.status, 0);
+    assert.match(unknown.stderr, /Unknown hud option: --definitely-unknown/);
+
+    const missing = run(['state', '--root']);
+    assert.notEqual(missing.status, 0);
+    assert.match(missing.stderr, /--root requires a value/);
+
+    const irrelevant = run(['desktop', '--tui']);
+    assert.notEqual(irrelevant.status, 0);
+    assert.match(irrelevant.stderr, /hud desktop does not support --tui/);
+
+    const positional = run(['shell', 'desktop']);
+    assert.notEqual(positional.status, 0);
+    assert.match(positional.stderr, /hud shell accepts at most 0 positional arguments/);
+
+    const ignoredPositional = run(['state', 'unexpected']);
+    assert.notEqual(ignoredPositional.status, 0);
+    assert.match(ignoredPositional.stderr, /hud state accepts at most 0 positional arguments/);
+
+    const runOption = run(['run', '--json', '--bad']);
+    assert.notEqual(runOption.status, 0);
+    assert.match(runOption.stderr, /Unknown hud option: --bad/);
+
+    const orphanedWorkflow = run(['run', '--stage', 'test', '--', process.execPath, '-e', '']);
+    assert.notEqual(orphanedWorkflow.status, 0);
+    assert.match(orphanedWorkflow.stderr, /workflow details require --workflow-id/);
+
+    const conflictingRequest = run(['run', '--request', 'text', '--request-b64', 'dGV4dA==', '--', process.execPath, '-e', '']);
+    assert.notEqual(conflictingRequest.status, 0);
+    assert.match(conflictingRequest.stderr, /either --request or --request-b64/);
+
+    const ignoredCopy = run(['handoff', '--copy', '--json']);
+    assert.notEqual(ignoredCopy.status, 0);
+    assert.match(ignoredCopy.stderr, /does not combine --copy with --json/);
+
+    const wrongLayer = run(['state', '--host', '127.0.0.1']);
+    assert.notEqual(wrongLayer.status, 0);
+    assert.match(wrongLayer.stderr, /hud state does not support --host/);
+
+    const selectedRoot = run(['state', '--json', '--root', root]);
+    assert.equal(selectedRoot.status, 0, selectedRoot.stderr || selectedRoot.stdout);
+    assert.equal(JSON.parse(selectedRoot.stdout).project.root, root);
+
+    const clear = run(['objective', '--clear', '--root', root]);
+    assert.equal(clear.status, 0, clear.stderr || clear.stdout);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('hud run JSON is pure for passing and failing commands', () => {
+  const root = mkdtempSync(join(tmpdir(), 'commandhud-json-route-'));
+  try {
+    execFileSync('git', ['init', '-b', 'main'], { cwd: root, stdio: 'pipe' });
+    execFileSync('git', ['config', 'user.email', 'hud@example.invalid'], { cwd: root });
+    execFileSync('git', ['config', 'user.name', 'HUD Test'], { cwd: root });
+    execFileSync('git', ['commit', '--allow-empty', '-m', 'fixture'], { cwd: root, stdio: 'pipe' });
+    const run = (script) => spawnSync(process.execPath, [cli, 'run', '--json', '--', process.execPath, '-e', script], {
+      cwd: root, encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, HUD_STATE_ROOT: join(root, '.state') },
+    });
+    const passing = spawnSync(process.execPath, [cli, 'run', '--json', '--workflow-id', 'verify', '--workflow-name', 'verify JSON', '--stage', 'test', '--stage-index', '1', '--stage-count', '1', '--', process.execPath, '-e', "console.log('not-before-json')"], {
+      cwd: root, encoding: 'utf8', timeout: 10_000,
+      env: { ...process.env, HUD_STATE_ROOT: join(root, '.state') },
+    });
+    assert.equal(passing.status, 0, passing.stderr);
+    assert.equal(JSON.parse(passing.stdout).status, 'pass');
+    assert.doesNotMatch(passing.stdout, /^not-before-json/m);
+
+    const failing = run("console.error('not-before-json'); process.exit(7)");
+    assert.equal(failing.status, 1, failing.stderr);
+    assert.equal(JSON.parse(failing.stdout).status, 'fail');
+    assert.doesNotMatch(failing.stdout, /^not-before-json/m);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test('hud runtime uses scriptable exit status for current and stale source authority', () => {
   const temporary = mkdtempSync(join(tmpdir(), 'commandhud-runtime-cli-'));
   const state = join(temporary, 'state');
@@ -116,6 +205,7 @@ test('hud storage human and JSON views inspect all retained projects without cre
       cwd: root, encoding: 'utf8', timeout: 20_000, env: { ...process.env, HUD_STATE_ROOT: state },
     });
     assert.equal(recorded.status, 0, recorded.stderr || recorded.stdout);
+    assert.equal(JSON.parse(recorded.stdout).status, 'pass');
     const runsRoot = join(state, 'runs');
     const countRuns = () => readdirSync(runsRoot, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile() && entry.name === 'run.json').length;
     const countBefore = countRuns();

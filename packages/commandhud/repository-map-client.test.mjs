@@ -4,9 +4,9 @@ import { readFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-const directory = join(dirname(fileURLToPath(import.meta.url)), 'visual-prototype');
+const directory = join(dirname(fileURLToPath(import.meta.url)), 'repository-map-client');
 
-test('visual HUD exposes one main menu over one command directory', () => {
+test('Repository Map client exposes one main menu over one command directory', () => {
   const html = readFileSync(join(directory, 'index.html'), 'utf8');
   const app = readFileSync(join(directory, 'app.js'), 'utf8');
   assert.equal((html.match(/id="toolkitButton"/g) || []).length, 1);

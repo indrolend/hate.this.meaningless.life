@@ -3,10 +3,6 @@
   "version": "0.0.0-convergence",
   "private": true,
   "type": "module",
-  "bin": {
-    "hud": "./cli.mjs",
-    "commandhud": "./cli.mjs"
-  },
   "scripts": {
     "test": "node --test ./*.test.mjs"
   }

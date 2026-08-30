@@ -4,28 +4,28 @@
 
 ## Primary product surface
 
-The terminal context-condensing shell launched by `CommandHUD Shell.cmd` or `hud shell` is the primary CommandHUD interface. It owns the shortest supported development loop: paste an ordinary command, execute it against the real local repository, retain immutable evidence, display a condensed result, and copy that result back to an LLM. Robustness, accessibility, and usability work should target this functional surface first; visual layers must remain replaceable clients.
+The terminal context-condensing clients launched by `CommandHUD-TUI.cmd`, `hud tui`, or `hud shell` are the primary CommandHUD interfaces. `hud tui` is the fixed terminal UI; `hud shell` is the plain line-oriented shell. They own the shortest supported development loop: paste an ordinary command, execute it against the real local repository, retain immutable evidence, display a condensed result, and copy that result back to an LLM. Robustness, accessibility, and usability work should target these functional surfaces first; visual layers must remain replaceable clients.
 
 The CLI remains first-class automation over the same core. The local server and browser renderer are secondary clients and must continue to consume the same semantic state; they must not become a separate authority or dictate the core architecture.
 
 ## Install the local entrypoint
 
-From this package directory:
+From the repository root (the sole package installation authority):
 
 ```text
 npm link
 ```
 
-This exposes `hud` and `commandhud` through npm's user-level binary directory. It does not install a service or start a UI. Remove it with `npm unlink --global @indrolend/commandhud`.
+This exposes `hud` and `commandhud` through npm's user-level binary directory. It does not install a service or start a UI. Remove it with `npm unlink --global @indrolend/hate-this-meaningless-life`.
 
-Without linking, use `node cli.mjs <command>`.
+Without linking, use `node packages/commandhud/cli.mjs <command>` from the repository root.
 
 ## Windows desktop launcher
 
-Run the product-root `CommandHUD.cmd` from the repository you want to attach, or run:
+Run the product-root `CommandHUD-Desktop.cmd` from the repository you want to attach, use `CommandHUD.cmd desktop`, or run:
 
 ```powershell
-node cli.mjs desktop --root C:\path\to\repository
+node packages/commandhud/cli.mjs desktop --root C:\path\to\repository
 ```
 
 The launcher verifies the repository, acquires one desktop-instance lock for it, starts the same loopback-only authoritative HUD server on an available port, and opens the renderer in a dedicated Microsoft Edge or Google Chrome app-mode window. Closing that window stops the owned server and releases the lock. A stale lock from a dead launcher is replaced; a live owner blocks a second desktop instance.
@@ -78,17 +78,18 @@ On Windows, `hud service <name>` performs a validated read-only service probe an
 
 Run `hud shell` for a persistent terminal interface over the same immutable evidence and reduction system as the desktop command bar. Paste ordinary commands directly; CommandHUD executes them in the selected shell, displays the shortened result, and automatically copies that identical ChatGPT-ready context to the clipboard while retaining complete stdout and stderr.
 
-On Windows, `CommandHUD Shell.cmd` at the repository root provides the same terminal-only interface as a double-clickable launcher. It finds the HUD relative to the clone instead of relying on a fixed checkout path, reports a clear prerequisite error when Node.js is unavailable, and remains valid across branches. Desktop `.lnk` files are intentionally machine-specific; point one at the repository-owned `.cmd` in each clone.
+On Windows, `CommandHUD-TUI.cmd` provides the fixed terminal UI and `CommandHUD-Desktop.cmd` provides the Repository Map desktop client. `CommandHUD.cmd` forwards the complete CLI and therefore behaves like the installed `commandhud` compatibility alias, including context output when no command is supplied. The historical spaced filename `CommandHUD Shell.cmd` remains a compatibility alias for `CommandHUD.cmd shell` and forwards all arguments. Quote that legacy path in PowerShell. Desktop `.lnk` files are intentionally machine-specific; point one at an explicit repository-owned launcher in each clone.
 
 ```text
 hud shell
+hud tui
 hud shell --shell bash
 hud shell --no-animation
-"CommandHUD Shell.cmd" --no-animation
+CommandHUD-TUI.cmd --no-animation
 hud shell --plain
-"CommandHUD Shell.cmd" --plain
+CommandHUD.cmd shell
 hud shell --tui
-"CommandHUD Shell.cmd" --tui
+CommandHUD-TUI.cmd
 ```
 
 The terminal keeps repository-contained cwd changes between commands. `/copy`, `/context`, `/raw`, `/head`, `/tail`, `/find`, `/around`, `/diff`, `/history`, `/undo`, `/shell`, `/cwd`, and `/exit` expose the recorded context and controls without requiring repeated `hud run` wrappers. Evidence commands default to the latest run. Older evidence uses `/raw <run>`, `/head <run> [count]`, `/tail <run> [count]`, `/find <run> <pattern>`, or `/around <run> <pattern> [lines]`; explicit run selection always wins and malformed requests fail instead of silently using the latest run. `/diff <run> <run>` compares retained stdout and stderr through Git's existing diff primitive. `/history [n]` lists 1–100 records without turning the active window into scrollback. Undo remains preview-first. Clipboard failure is reported without changing the real command result or terminating the shell.
@@ -103,11 +104,11 @@ Interactive sessions reuse the face-state grammar from the original CommandHUD p
 
 The default interface is deliberately line-oriented: a simple `> ` prompt, real command execution, condensed output, automatic copy, and slash-command access to evidence and Undo. It does not use the alternate screen, terminal mouse reporting, or cursor-positioned panels.
 
-`--tui` opts into the experimental fixed visual client. That client keeps the face/status header, readline-owned `> ` input field, bounded output panel, and semantic controls in stable regions. Tab or Shift-Tab enters and traverses control focus; Left/Right also traverse while focused, Enter or Space activates, and Escape returns to command editing. Mouse hover and click dispatch the same underlying actions directly—they never type slash-command text into the editor. Slash commands remain available from the keyboard and in plain mode. Mouse reporting is disabled before leaving the alternate screen. The TUI must never become runtime authority or weaken the plain shell path.
+`hud tui` or `--tui` selects the fixed terminal client. It keeps the face/status header, readline-owned `> ` input field, bounded output panel, and semantic controls in stable regions. Tab or Shift-Tab enters and traverses control focus; Left/Right also traverse while focused, Enter or Space activates, and Escape returns to command editing. Mouse hover and click dispatch the same underlying actions directly—they never type slash-command text into the editor. Slash commands remain available from the keyboard and in plain mode. Mouse reporting is disabled before leaving the alternate screen. The TUI must never become runtime authority or weaken the plain shell path.
 
 Terminal write tracing is disabled normally. Set `COMMANDHUD_TRACE_WRITES=1` only while diagnosing fixed-layout rendering; the temporary trace wrapper is removed when the shell exits.
 
-`hud run` streams the command while writing separate raw stdout and stderr logs. Use `--quiet` when only the final reduced packet is wanted. A nonzero underlying command remains nonzero: `PASS` exits 0, `FAIL` exits 1, `BLOCKED` exits 2, and HUD transport/tooling `ERROR` exits 3.
+`hud run` streams the command while writing separate raw stdout and stderr logs. Use `--quiet` to suppress live child output or `--json` for one structured run result containing the operation, presentation, packet, raw evidence paths, and repository currency. A nonzero underlying command remains nonzero: `PASS` exits 0, `FAIL` exits 1, `BLOCKED` exits 2, and HUD transport/tooling `ERROR` exits 3.
 
 ## State
 
@@ -180,7 +181,7 @@ project  cwd  git  repository  workflow  last  next  status
 
 This is the boundary for quick-context text and future visual renderers. Add facts here only when an existing authoritative source can derive them and a real renderer needs them.
 
-## Repository map prototype
+## Repository Map client
 
 The renderer consumes the same repository projection exposed by `hud state --json`. The projection is built from Git tracked files plus nonignored untracked files, with deterministic hierarchy, mechanical file metadata, and porcelain Git status where known.
 
@@ -313,7 +314,7 @@ Before changing the HUD:
 ```text
 git status --short --branch
 npm test
-node cli.mjs state
+node packages/commandhud/cli.mjs state
 ```
 
 Preserve these contracts:
@@ -323,7 +324,7 @@ Preserve these contracts:
 - a nonzero underlying command remains nonzero;
 - workflow retries resolve from the latest immutable stage attempt;
 - non-repository roots are rejected rather than silently substituted;
-- the visual prototype remains a renderer, not a second backend.
+- the Repository Map client remains a renderer, not a second backend.
 
 Current local continuation sequence is represented by these commits:
 

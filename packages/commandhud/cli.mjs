@@ -7,7 +7,8 @@ import { formatPacket, formatRepositoryCommandImpact, formatRepositoryCommandPro
 const HELP = `hate.this.meaningless.life · context condenser
 
 Run from any Git repository:
-  hud shell                         interactive terminal + compact clipboard result
+  hud shell                         plain terminal + compact clipboard result
+  hud tui                           fixed terminal UI + compact clipboard result
   hud run -- <command>              record one command and print a compact packet
   hud state [--json]                current repository and last-operation state
   hud search <query> [scope]        recorded ripgrep search
@@ -36,7 +37,7 @@ Safety and authority:
   hud compare-files <left> <right>
 
 Other clients:
-  hud desktop                       Windows app window
+  hud desktop                       Windows Repository Map application
   hud serve                         loopback typed-operation server
 
 Use --root <path> to select an explicit Git repository.`;
@@ -46,29 +47,87 @@ function parse(argv) {
   const options = { copy: false, quiet: false, root: null, shell: null, animation: true, tui: false, objective: null, request: null, requestB64: null, workflowId: null, workflowName: null, stage: null, stageIndex: null, stageCount: null, json: false, host: '127.0.0.1', port: 8765 };
   const command = args.shift() || 'context';
   const positionals = [];
+  const usedOptions = new Set();
+  const optionValue = (name, index) => {
+    if (index + 1 >= args.length || args[index + 1].startsWith('--')) throw new Error(`${name} requires a value.`);
+    usedOptions.add(name.slice(2));
+    return args[index + 1];
+  };
   for (let index = 0; index < args.length; index++) {
     const value = args[index];
     if (value === '--') { positionals.push(...args.slice(index + 1)); break; }
-    if (value === '--copy' || value === '--copy-packet') options.copy = true;
-    else if (value === '--no-animation') options.animation = false;
-    else if (value === '--plain') options.tui = false;
-    else if (value === '--tui') options.tui = true;
-    else if (value === '--quiet') options.quiet = true;
-    else if (value === '--json') options.json = true;
-    else if (value === '--lan') options.host = '0.0.0.0';
-    else if (value === '--host') options.host = args[++index];
-    else if (value === '--port') options.port = Number(args[++index]);
-    else if (value === '--root' || value === '--shell' || value === '--objective' || value === '--request') options[value.slice(2)] = args[++index];
-    else if (value === '--request-b64') options.requestB64 = args[++index];
-    else if (value === '--workflow-id') options.workflowId = args[++index];
-    else if (value === '--workflow-name') options.workflowName = args[++index];
-    else if (value === '--stage') options.stage = args[++index];
-    else if (value === '--stage-index') options.stageIndex = Number(args[++index]);
-    else if (value === '--stage-count') options.stageCount = Number(args[++index]);
+    if (value === '--copy' || value === '--copy-packet') { options.copy = true; usedOptions.add('copy'); }
+    else if (value === '--no-animation') { options.animation = false; usedOptions.add('animation'); }
+    else if (value === '--plain') { options.tui = false; usedOptions.add('tui'); }
+    else if (value === '--tui') { options.tui = true; usedOptions.add('tui'); }
+    else if (value === '--quiet') { options.quiet = true; usedOptions.add('quiet'); }
+    else if (value === '--json') { options.json = true; usedOptions.add('json'); }
+    else if (value === '--lan') { options.host = '0.0.0.0'; usedOptions.add('host'); }
+    else if (value === '--host') { options.host = optionValue(value, index); index++; }
+    else if (value === '--port') { options.port = Number(optionValue(value, index)); index++; }
+    else if (value === '--root' || value === '--shell' || value === '--objective' || value === '--request') { options[value.slice(2)] = optionValue(value, index); index++; }
+    else if (value === '--request-b64') { options.requestB64 = optionValue(value, index); index++; }
+    else if (value === '--workflow-id') { options.workflowId = optionValue(value, index); index++; }
+    else if (value === '--workflow-name') { options.workflowName = optionValue(value, index); index++; }
+    else if (value === '--stage') { options.stage = optionValue(value, index); index++; }
+    else if (value === '--stage-index') { options.stageIndex = Number(optionValue(value, index)); index++; }
+    else if (value === '--stage-count') { options.stageCount = Number(optionValue(value, index)); index++; }
+    else if ((command === 'objective' || command === 'frontier') && value === '--clear') positionals.push(value);
+    else if (value.startsWith('-')) throw new Error(`Unknown hud option: ${value}`);
     else if (command === 'run') { positionals.push(...args.slice(index)); break; }
     else positionals.push(value);
   }
-  return { command, args: positionals, options };
+  return { command, args: positionals, options, usedOptions };
+}
+
+function validateCommandOptions(command, args, options, usedOptions) {
+  const rootJson = new Set(['root', 'json']);
+  const routes = {
+    runtime: rootJson, storage: rootJson, context: rootJson, status: rootJson, state: rootJson,
+    tree: rootJson, 'file-identity': rootJson, 'compare-files': rootJson, service: rootJson,
+    'service-reset-plan': rootJson, search: rootJson, proof: rootJson, impact: rootJson,
+    'undo-plan': rootJson, continue: rootJson, objective: rootJson, frontier: rootJson,
+    tools: rootJson, last: rootJson, history: rootJson, sequences: rootJson,
+    raw: rootJson, head: rootJson, tail: rootJson, find: rootJson, around: rootJson,
+    diff: rootJson, copy: rootJson, update: rootJson,
+    desktop: new Set(['root']),
+    serve: new Set(['root', 'host', 'port']),
+    shell: new Set(['root', 'shell', 'animation', 'tui']),
+    tui: new Set(['root', 'shell', 'animation']),
+    'repository-command': new Set(['root', 'quiet', 'json']),
+    lint: new Set(['root', 'quiet', 'json']),
+    undo: new Set(['root', 'quiet', 'json']),
+    handoff: new Set(['root', 'copy', 'json']),
+    workflow: new Set(['root', 'copy', 'json']),
+    run: new Set(['root', 'copy', 'quiet', 'json', 'objective', 'request', 'request-b64', 'workflow-id', 'workflow-name', 'stage', 'stage-index', 'stage-count']),
+    packet: new Set(['root', 'copy']),
+    open: new Set(['root']),
+  };
+  const allowed = routes[command];
+  if (!allowed) return;
+  const unsupported = [...usedOptions].filter((option) => !allowed.has(option));
+  if (unsupported.length) throw new Error(`hud ${command} does not support --${unsupported[0]}.`);
+
+  const argumentLimits = {
+    runtime: [0, 0], storage: [0, 0], context: [0, 0], status: [0, 0], state: [0, 0],
+    tree: [0, 0], 'file-identity': [1, 1], 'compare-files': [2, 2], service: [1, 1],
+    'service-reset-plan': [1, 1], desktop: [0, 0], serve: [0, 0], shell: [0, 0], tui: [0, 0],
+    search: [1, 2], 'repository-command': [1, 1], proof: [1, 1], impact: [1, 1], lint: [0, 0],
+    'undo-plan': [1, 1], undo: [1, 1], handoff: [0, 0], continue: [0, 0], tools: [0, 0],
+    run: [1, Infinity], last: [0, 0], packet: [0, 0], workflow: [1, 1], history: [0, 1],
+    sequences: [0, 1], raw: [1, 1], head: [1, 2], tail: [1, 2], find: [2, Infinity],
+    around: [2, 3], diff: [2, 2], copy: [1, 1], update: [0, 0], open: [0, 1],
+  };
+  const [minimum, maximum] = argumentLimits[command] || [0, Infinity];
+  if (args.length < minimum) throw new Error(`hud ${command} requires ${minimum === 1 ? 'an argument' : `${minimum} arguments`}.`);
+  if (args.length > maximum) throw new Error(`hud ${command} accepts at most ${maximum} positional argument${maximum === 1 ? '' : 's'}.`);
+  if (command === 'open' && args[0] && !['stdout', 'stderr', 'record'].includes(args[0])) throw new Error('hud open accepts only stdout, stderr, or record.');
+  if (usedOptions.has('stage-index') && (!Number.isInteger(options.stageIndex) || options.stageIndex < 0)) throw new Error('--stage-index requires a non-negative integer.');
+  if (usedOptions.has('stage-count') && (!Number.isInteger(options.stageCount) || options.stageCount < 0)) throw new Error('--stage-count requires a non-negative integer.');
+  if (usedOptions.has('request') && usedOptions.has('request-b64')) throw new Error('hud run accepts either --request or --request-b64, not both.');
+  const workflowDetails = ['workflow-name', 'stage', 'stage-index', 'stage-count'];
+  if (!usedOptions.has('workflow-id') && workflowDetails.some((option) => usedOptions.has(option))) throw new Error('hud run workflow details require --workflow-id.');
+  if (usedOptions.has('copy') && usedOptions.has('json')) throw new Error(`hud ${command} does not combine --copy with --json.`);
 }
 
 function printObject(object) {
@@ -168,11 +227,12 @@ function renderContinue(value) {
 }
 
 async function main() {
-  const { command, args, options } = parse(process.argv.slice(2));
+  const { command, args, options, usedOptions } = parse(process.argv.slice(2));
   if (['help', '--help', '-h'].includes(command)) {
     console.log(HELP);
     return;
   }
+  validateCommandOptions(command, args, options, usedOptions);
   if (command === 'runtime') {
     let selectedProject = null;
     try { selectedProject = await resolveProject({ root: options.root }); }
@@ -292,9 +352,9 @@ async function main() {
     }
     return;
   }
-  if (command === 'shell') {
+  if (command === 'shell' || command === 'tui') {
     const { startHudShell } = await import('./shell.mjs');
-    await startHudShell(project, { shell: options.shell || undefined, visual: options.animation, tui: options.tui });
+    await startHudShell(project, { shell: options.shell || undefined, visual: options.animation, tui: command === 'tui' ? true : options.tui });
     return;
   }
   if (command === 'serve') {
@@ -334,7 +394,7 @@ async function main() {
   if (command === 'repository-command') {
     const name = args[0];
     if (!name) throw new Error('hud repository-command requires a discovered command name.');
-    const record = await runRepositoryCommand(project, name, { stream: !options.quiet, origin: 'cli-argv' });
+    const record = await runRepositoryCommand(project, name, { stream: !options.quiet && !options.json, origin: 'cli-argv' });
     if (options.json) {
       console.log(JSON.stringify({
         runId: record.id, status: record.status, operation: record.operation,
@@ -374,7 +434,7 @@ async function main() {
   }
   if (command === 'lint') {
     if (args.length) throw new Error('hud lint does not accept command text or undeclared arguments.');
-    const record = await lintRepository(project, { stream: !options.quiet, origin: 'cli-argv' });
+    const record = await lintRepository(project, { stream: !options.quiet && !options.json, origin: 'cli-argv' });
     if (options.json) {
       console.log(JSON.stringify({
         runId: record.id, status: record.status, operation: record.operation,
@@ -410,7 +470,7 @@ async function main() {
   if (command === 'undo') {
     const runId = args[0];
     if (!runId) throw new Error('hud undo requires a recorded run ID.');
-    const record = await undoOperation(project, runId, { stream: !options.quiet, origin: 'cli-argv' });
+    const record = await undoOperation(project, runId, { stream: !options.quiet && !options.json, origin: 'cli-argv' });
     if (options.json) return console.log(JSON.stringify({
       runId: record.id, status: record.status, operation: record.operation,
       stdoutPath: record.stdoutPath, stderrPath: record.stderrPath, currency: record.currencyAfter,
@@ -457,7 +517,17 @@ async function main() {
       index: Number.isInteger(options.stageIndex) ? options.stageIndex : null,
       count: Number.isInteger(options.stageCount) ? options.stageCount : null,
     } : null;
-    const record = await runCommand(project, args, { objective: options.objective, request, workflow, stream: !options.quiet, origin: 'cli-argv' });
+    const record = await runCommand(project, args, { objective: options.objective, request, workflow, stream: !options.quiet && !options.json, origin: 'cli-argv' });
+    if (options.json) {
+      console.log(JSON.stringify({
+        runId: record.id, status: record.status, operation: record.operation,
+        presentation: record.presentation, packet: record.packet,
+        stdoutPath: record.stdoutPath, stderrPath: record.stderrPath,
+        currency: record.currencyAfter,
+      }, null, 2));
+      process.exitCode = record.exitCode === 0 ? 0 : record.status === 'blocked' ? 2 : 1;
+      return;
+    }
     const packet = formatPacket(record.packet);
     const view = record.presentation;
     console.log(`\n${view.status.toUpperCase()} - ${(view.durationMs / 1000).toFixed(1)}s`);
