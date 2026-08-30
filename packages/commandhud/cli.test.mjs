@@ -96,3 +96,39 @@ test('hud impact human and JSON views inspect one retained record without creati
     rmSync(temporary, { recursive: true, force: true });
   }
 });
+
+test('hud storage human and JSON views inspect all retained projects without creating a run', () => {
+  const temporary = mkdtempSync(join(tmpdir(), 'commandhud-storage-cli-'));
+  const state = join(temporary, 'state');
+  const root = join(temporary, 'repo');
+  mkdirSync(root, { recursive: true });
+  writeFileSync(join(root, 'file.txt'), 'fixture\n');
+  execFileSync('git', ['init', '-b', 'main'], { cwd: root });
+  execFileSync('git', ['config', 'user.email', 'hud@example.invalid'], { cwd: root });
+  execFileSync('git', ['config', 'user.name', 'HUD Test'], { cwd: root });
+  execFileSync('git', ['add', '.'], { cwd: root });
+  execFileSync('git', ['commit', '-m', 'fixture'], { cwd: root });
+  const run = (args) => spawnSync(process.execPath, [cli, ...args, '--root', root], {
+    cwd: root, encoding: 'utf8', timeout: 20_000, env: { ...process.env, HUD_STATE_ROOT: state },
+  });
+  try {
+    const recorded = spawnSync(process.execPath, [cli, 'run', '--json', '--quiet', '--root', root, '--', process.execPath, '-e', 'console.log("stored")'], {
+      cwd: root, encoding: 'utf8', timeout: 20_000, env: { ...process.env, HUD_STATE_ROOT: state },
+    });
+    assert.equal(recorded.status, 0, recorded.stderr || recorded.stdout);
+    const runsRoot = join(state, 'runs');
+    const countRuns = () => readdirSync(runsRoot, { recursive: true, withFileTypes: true }).filter((entry) => entry.isFile() && entry.name === 'run.json').length;
+    const countBefore = countRuns();
+    const json = run(['storage', '--json']);
+    const human = run(['storage']);
+    assert.equal(json.status, 0, json.stderr || json.stdout);
+    assert.equal(human.status, 0, human.stderr || human.stdout);
+    const value = JSON.parse(json.stdout);
+    assert.equal(value.runCount, 1);
+    assert.equal(value.integrity.VERIFIED, 1);
+    assert.match(human.stdout, /COMMANDHUD_STORAGE[\s\S]*runs=1[\s\S]*INTEGRITY VERIFIED=1/);
+    assert.equal(countRuns(), countBefore);
+  } finally {
+    rmSync(temporary, { recursive: true, force: true });
+  }
+});

@@ -57,8 +57,9 @@ export function createShellVisualStatus(output, { enabled = true, animated = tru
       if (!enabled) return;
       if (timer) clearInterval(timer);
       timer = null;
-      const finalState = status === 'pass' ? 'PASS' : status === 'interrupted' ? 'STOPPED' : 'FAIL';
-      const finalFace = status === 'pass' ? '(^_^)' : status === 'interrupted' ? '(-_-)' : '(x_x)';
+      const stopped = status === 'interrupted' || status === 'cancelled';
+      const finalState = status === 'pass' ? 'PASS' : stopped ? 'STOPPED' : 'FAIL';
+      const finalFace = status === 'pass' ? '(^_^)' : stopped ? '(-_-)' : '(x_x)';
       if (!animated) {
         draw(finalFace, finalState);
         return;

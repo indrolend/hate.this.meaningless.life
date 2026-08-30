@@ -45,3 +45,12 @@ test('reduced-motion visual status still updates its fixed row factually', async
   assert.match(value, /\(x_x\) FAIL/);
   assert.doesNotMatch(value, /[⠂⠒⠤⠲⠴⠦⠖⠶]/);
 });
+
+test('cancelled computation is displayed as stopped rather than failed', async () => {
+  let output = '';
+  const status = createShellVisualStatus({ write(value) { output += value; } }, { enabled: true, animated: false, row: 2 });
+  status.start('fixture');
+  await status.finish('cancelled');
+  assert.match(output, /STOPPED/);
+  assert.doesNotMatch(output, /FAIL/);
+});

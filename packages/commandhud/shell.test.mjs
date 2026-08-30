@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { PassThrough } from 'node:stream';
-import { deliverShellProjection, deliverShellResult, encodeClipboardInput, parseShellEvidenceCommand, renderShellEvidenceProjection, renderShellResult, shellInputIncomplete, startHudShell } from './shell.mjs';
+import { createTuiInputRouter, deliverShellProjection, deliverShellResult, encodeClipboardInput, parseShellEvidenceCommand, renderShellEvidenceProjection, renderShellResult, routeTuiInput, shellInputIncomplete, startHudShell } from './shell.mjs';
 import { listRuns, resolveProject, runRepositoryCommand } from './core.mjs';
 
 async function shellProject() {
@@ -16,6 +16,61 @@ async function shellProject() {
   execFileSync('git', ['commit', '--allow-empty', '-m', 'fixture'], { cwd: root });
   return resolveProject({ root, env: { ...process.env, HUD_STATE_ROOT: join(root, '.state') } });
 }
+
+test('TUI input routes mouse and keyboard controls semantically without typing slash commands', () => {
+  const dispatched = [];
+  const typed = [];
+  let restored = 0;
+  const state = { focus: null, hover: null };
+  const actions = ['copy', 'raw', 'undo', 'help', 'exit'];
+  const layout = {
+    actionAt(column, row) { return row === 24 && column >= 19 && column <= 32 ? 'copy' : null; },
+    setHover(action) { state.hover = action; },
+    setFocus(action) { state.focus = action; },
+    moveFocus(direction) {
+      const current = actions.indexOf(state.focus);
+      state.focus = actions[(current < 0 ? (direction < 0 ? actions.length - 1 : 0) : current + direction + actions.length) % actions.length];
+    },
+    get focusedAction() { return state.focus; },
+  };
+  const route = (value) => routeTuiInput(value, {
+    layout, dispatch: (action) => dispatched.push(action), writeText: (text) => typed.push(text), restoreEditor: () => { restored++; },
+  });
+  route('git status');
+  route('\x1b[<35;19;24M');
+  route('\x1b[<0;19;24M');
+  route('\x1b[<0;19;24m');
+  assert.equal(typed.join(''), 'git status');
+  assert.deepEqual(dispatched, ['copy']);
+  assert.equal(state.focus, 'copy');
+  assert.doesNotMatch(typed.join(''), /\/copy|0/);
+  route('\t');
+  assert.equal(state.focus, 'raw');
+  route('\r');
+  assert.deepEqual(dispatched, ['copy', 'raw']);
+  route('\x1b');
+  assert.equal(state.focus, null);
+  assert.equal(restored, 1);
+  route('x');
+  assert.equal(typed.join(''), 'git statusx');
+});
+
+test('TUI input buffers fragmented SGR mouse packets instead of leaking partial digits', () => {
+  const typed = [];
+  const dispatched = [];
+  const layout = {
+    actionAt(column, row) { return column === 19 && row === 24 ? 'copy' : null; },
+    setHover() {}, setFocus() {}, moveFocus() {}, get focusedAction() { return null; },
+  };
+  const route = createTuiInputRouter({
+    layout, dispatch: (action) => dispatched.push(action), writeText: (text) => typed.push(text),
+  });
+  route('echo ok\x1b[<0;1');
+  route('9;24M\x1b[<0;19;');
+  route('24m');
+  assert.equal(typed.join(''), 'echo ok');
+  assert.deepEqual(dispatched, ['copy']);
+});
 
 test('terminal evidence commands target the latest or an explicit immutable run', () => {
   const runId = '20260826010101-abcd';

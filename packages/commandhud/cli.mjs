@@ -2,7 +2,7 @@
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { formatPacket, formatRepositoryCommandImpact, formatRepositoryCommandProof, resolveProject, gitSnapshot, repositoryCommandImpact, repositoryCommandProof, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, lintRepository, runCommand, runRepositoryCommand, searchRepository, buildCurrentOperationContext, filesystemIdentity, inspectRuntimeAuthority, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, repeatedOperationSequences, runById, fetchUpdate, continuation, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { formatPacket, formatRepositoryCommandImpact, formatRepositoryCommandProof, resolveProject, gitSnapshot, repositoryCommandImpact, repositoryCommandProof, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, lintRepository, runCommand, runRepositoryCommand, searchRepository, buildCurrentOperationContext, filesystemIdentity, inspectRuntimeAuthority, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, repeatedOperationSequences, runById, fetchUpdate, continuation, setWorkingValue, storageInventory, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
 
 const HELP = `hate.this.meaningless.life · context condenser
 
@@ -18,6 +18,7 @@ Run from any Git repository:
   hud impact <name>                inspect retained stage evidence against current paths
 
 Retained evidence (never reruns the command):
+  hud storage [--json]              read-only evidence usage and integrity inventory
   hud history [count]
   hud sequences [history-count]     report repeated adjacent operations; never executes
   hud handoff [--copy]
@@ -96,6 +97,29 @@ function printEvidenceProjection(value) {
   }
 }
 
+function formatBytes(value) {
+  const units = ['B', 'KiB', 'MiB', 'GiB', 'TiB'];
+  let amount = Number(value) || 0;
+  let unit = 0;
+  while (amount >= 1024 && unit < units.length - 1) { amount /= 1024; unit++; }
+  return `${amount >= 100 || unit === 0 ? amount.toFixed(0) : amount.toFixed(1)} ${units[unit]}`;
+}
+
+function printStorage(value) {
+  console.log('COMMANDHUD_STORAGE');
+  console.log(`STORE ${value.store}`);
+  console.log(`TOTAL ${formatBytes(value.totalBytes)} files=${value.fileCount} runs=${value.runCount} projects=${value.projectCount}`);
+  console.log(`INTEGRITY VERIFIED=${value.integrity.VERIFIED} UNKNOWN=${value.integrity.UNKNOWN} MISSING=${value.integrity.MISSING} CORRUPT=${value.integrity.CORRUPT}`);
+  console.log(`REVERSIBLE ${value.reversibleRuns}`);
+  console.log(`BENCHMARK_SCALE ${formatBytes(value.benchmarkScale.bytes)} runs=${value.benchmarkScale.runCount} threshold=${formatBytes(value.benchmarkScale.thresholdBytes)}`);
+  if (value.oldest) console.log(`OLDEST ${value.oldest.startedAt} ${value.oldest.project} run:${value.oldest.runId}`);
+  if (value.newest) console.log(`NEWEST ${value.newest.startedAt} ${value.newest.project} run:${value.newest.runId}`);
+  console.log('PROJECTS');
+  for (const item of value.projects) console.log(`${formatBytes(item.bytes)} runs=${item.runs} files=${item.files} ${item.project}`);
+  console.log('LARGEST_RUNS');
+  for (const item of value.largestRuns) console.log(`${formatBytes(item.bytes)} raw=${formatBytes(item.rawBytes)} integrity=${item.integrity} ${item.project} run:${item.runId}`);
+}
+
 async function context(project, json) {
   const [git, tools] = await Promise.all([gitSnapshot(project.root), discoverTools()]);
   let update;
@@ -171,6 +195,11 @@ async function main() {
     return;
   }
   const project = await resolveProject({ root: options.root });
+  if (command === 'storage') {
+    if (args.length) throw new Error('hud storage does not accept positional arguments.');
+    const value = storageInventory(project);
+    return options.json ? console.log(JSON.stringify(value, null, 2)) : printStorage(value);
+  }
   if (command === 'context' || command === 'status') return context(project, options.json);
   if (command === 'state') {
     const value = await currentState(project);

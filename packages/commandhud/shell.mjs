@@ -9,6 +9,73 @@ import {
 import { createShellVisualStatus, IDLE_FACE, visualMotionEnabled } from './shell-visual.mjs';
 import { createShellLayout, splitMouseInput } from './shell-layout.mjs';
 
+function createActionChannel() {
+  const queue = [];
+  let waiter = null;
+  return {
+    push(value) {
+      if (waiter) { const pending = waiter; waiter = null; pending.resolve(value); }
+      else queue.push(value);
+    },
+    next() {
+      if (queue.length) return Promise.resolve(queue.shift());
+      if (!waiter) {
+        let resolve;
+        const promise = new Promise((accept) => { resolve = accept; });
+        waiter = { promise, resolve };
+      }
+      return waiter.promise;
+    },
+  };
+}
+
+export function routeTuiInput(value, { layout, dispatch, writeText, restoreEditor = () => {} }) {
+  const parsed = splitMouseInput(Buffer.isBuffer(value) ? value.toString('utf8') : String(value));
+  for (const event of parsed.events) {
+    const action = layout.actionAt(event.column, event.row);
+    layout.setHover(action);
+    if (event.button === 0 && event.phase === 'M' && action) {
+      layout.setFocus(action);
+      dispatch(action);
+    }
+  }
+  const text = parsed.text;
+  for (let index = 0; index < text.length;) {
+    const sequence = text.slice(index, index + 3);
+    const token = ['\x1b[Z', '\x1b[C', '\x1b[D'].includes(sequence) ? sequence : text[index];
+    index += token.length;
+    if (!layout.focusedAction) {
+      if (token === '\t' || token === '\x1b[Z') layout.moveFocus(token === '\x1b[Z' ? -1 : 1);
+      else writeText(token);
+      continue;
+    }
+    if (token === '\t' || token === '\x1b[C') layout.moveFocus(1);
+    else if (token === '\x1b[Z' || token === '\x1b[D') layout.moveFocus(-1);
+    else if (token === '\x1b') { layout.setFocus(null); restoreEditor(); }
+    else if (token === '\r' || token === '\n' || token === ' ') dispatch(layout.focusedAction);
+    else {
+      layout.setFocus(null);
+      restoreEditor();
+      writeText(token);
+    }
+  }
+}
+
+export function createTuiInputRouter(options) {
+  let pendingMouse = '';
+  return (value) => {
+    const combined = pendingMouse + (Buffer.isBuffer(value) ? value.toString('utf8') : String(value));
+    pendingMouse = '';
+    const start = combined.lastIndexOf('\x1b[<');
+    if (start >= 0 && /^\x1b\[<[\d;]*$/.test(combined.slice(start))) {
+      pendingMouse = combined.slice(start);
+      if (start) routeTuiInput(combined.slice(0, start), options);
+      return;
+    }
+    routeTuiInput(combined, options);
+  };
+}
+
 export function encodeClipboardInput(text, targetPlatform = process.platform) {
   return targetPlatform === 'win32' ? Buffer.from(String(text), 'utf16le') : String(text);
 }
@@ -216,6 +283,8 @@ export async function startHudShell(project, {
   }
   const terminal = createInterface({ input: filteredInput, output, terminal: interactive });
   const commandLines = terminal[Symbol.asyncIterator]();
+  const actions = createActionChannel();
+  let pendingLine = null;
   if (layout.active === false && interactive && tui) layout.start();
   if (!layout.active) {
     output.write(`${IDLE_FACE} hate.this.meaningless.life · context condenser\n`);
@@ -224,21 +293,60 @@ export async function startHudShell(project, {
 
   const show = (value) => layout.active ? layout.renderOutput(String(value).trimEnd()) : output.write(value);
 
+  const dispatchShellAction = async (action, requested = null) => {
+    const previous = lastRun(project);
+    if (action === 'exit') return { exit: true };
+    if (action === 'help') { show(`${help()}\n\n`); return { exit: false }; }
+    if (action === 'copy') {
+      const selected = requested ? runById(project, requested) : previous;
+      if (!selected?.operation) show(`${requested ? `No structured run found for ${requested}.` : 'No structured command has been recorded yet.'}\n\n`);
+      else {
+        const value = (await buildCurrentOperationContext(project, selected)).handoff;
+        try { clipboardWriter(value); show(`COPIED run:${selected.id}\n\n${value}`); }
+        catch (error) { show(`NOT COPIED · ${error.message}\nContext remains available with /context ${selected.id}.\n\n`); }
+      }
+      return { exit: false };
+    }
+    if (action === 'raw') {
+      const selected = requested ? runById(project, requested) : previous;
+      if (!selected) show(`${requested ? `No recorded run found for ${requested}.` : 'No command has been recorded yet.'}\n\n`);
+      else {
+        try {
+          const value = projectRunEvidence(project, selected.id, { runId: selected.id, mode: 'raw' });
+          deliverShellProjection(renderShellEvidenceProjection(value), show, clipboardWriter, `run:${selected.id}`);
+        } catch (error) { show(`${error.message}\n\n`); }
+      }
+      return { exit: false };
+    }
+    if (action === 'undo') {
+      const target = requested ? listRuns(project, 100).find((run) => run.id === requested) : previous;
+      if (!target) { show('No recorded command is available for Undo.\n\n'); return { exit: false }; }
+      const plan = await undoPlan(project, target.id);
+      const planLines = [`UNDO ${plan.state} · run:${target.id}`, plan.reason, ...plan.paths];
+      if (!requested && plan.state === 'SAFE') planLines.push(`Apply explicitly with /undo ${target.id}`);
+      if (!requested && plan.state === 'SAFE') show(`${planLines.join('\n')}\n\n`);
+      else if (requested && plan.state === 'SAFE') {
+        const record = await undoOperation(project, target.id, { origin: 'terminal-ui' });
+        show(`${renderShellResult(project, record)}\n\n`);
+      } else show(`${planLines.join('\n')}\n\n`);
+      return { exit: false };
+    }
+    throw new Error(`Unknown shell action: ${action}`);
+  };
+
+  const routeInput = createTuiInputRouter({
+      layout,
+      dispatch: (action) => actions.push(action),
+      writeText: (text) => filteredInput.write(text),
+      restoreEditor: () => {
+        layout.placePrompt();
+        terminal.setPrompt('> ');
+        terminal.prompt(true);
+      },
+  });
   const inputHandler = (chunk) => {
     if (!layout.active) return;
-    const parsed = splitMouseInput(Buffer.isBuffer(chunk) ? chunk.toString('utf8') : String(chunk));
-    for (const event of parsed.events) {
-      const action = layout.actionAt(event.column, event.row);
-      layout.setHover(action);
-      if (event.button !== 0 || event.phase !== 'M' || !action) continue;
-      if (terminal.line) {
-        show('Finish or clear the current command before using a mouse action.');
-        continue;
-      }
-      terminal.write(action);
-      terminal.write(null, { name: 'return' });
-    }
-    if (parsed.text) filteredInput.write(parsed.text);
+    routeInput(chunk);
   };
   if (layout.active) input.on('data', inputHandler);
 
@@ -250,12 +358,22 @@ export async function startHudShell(project, {
     while (true) {
       let command;
       try {
-        if (interactive) {
-          const prompt = layout.active ? '> ' : '> ';
-          if (layout.active) layout.placePrompt(prompt);
-          else output.write(prompt);
+        if (interactive && !layout.focusedAction) {
+          if (layout.active) layout.placePrompt();
+          terminal.setPrompt('> ');
+          terminal.prompt(true);
         }
-        const next = await commandLines.next();
+        pendingLine ||= commandLines.next().then((value) => ({ kind: 'line', value }));
+        const interaction = layout.active
+          ? await Promise.race([pendingLine, actions.next().then((action) => ({ kind: 'action', action }))])
+          : await pendingLine;
+        if (interaction.kind === 'action') {
+          const result = await dispatchShellAction(interaction.action);
+          if (result.exit) break;
+          continue;
+        }
+        const next = interaction.value;
+        pendingLine = null;
         if (layout.active) layout.clearPrompt();
         if (next.done) break;
         command = next.value;
@@ -265,8 +383,14 @@ export async function startHudShell(project, {
       while (shellInputIncomplete(shell.id, command)) {
         let continuation = null;
         try {
-          if (interactive && layout.active) layout.placePrompt('... ');
-          else if (interactive) output.write('... ');
+          if (interactive && layout.active) {
+            layout.placePrompt();
+            terminal.setPrompt('... ');
+            terminal.prompt(true);
+          } else if (interactive) {
+            terminal.setPrompt('... ');
+            terminal.prompt(true);
+          }
           const next = await commandLines.next();
           if (layout.active) layout.clearPrompt();
           if (!next.done) {
@@ -288,8 +412,13 @@ export async function startHudShell(project, {
       }
       command = command.trim();
       if (!command) continue;
-      if (command === '/exit' || command === '/quit') break;
-      if (command === '/help') { show(`${help()}\n\n`); continue; }
+      layout.setFocus(null);
+      const semantic = command.match(/^\/(copy|raw|undo|help|exit|quit)(?:\s+(\S+))?$/);
+      if (semantic) {
+        const result = await dispatchShellAction(semantic[1] === 'quit' ? 'exit' : semantic[1], semantic[2] || null);
+        if (result.exit) break;
+        continue;
+      }
       if (command === '/cwd') { show(`${cwd}\n\n`); continue; }
       if (command.startsWith('/shell')) {
         const id = command.split(/\s+/, 2)[1];

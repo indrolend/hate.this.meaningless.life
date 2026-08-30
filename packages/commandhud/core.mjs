@@ -2013,6 +2013,84 @@ export function classifyRunEvidenceIntegrity(project, record) {
   return 'VERIFIED';
 }
 
+function directoryUsage(path) {
+  let bytes = 0;
+  let files = 0;
+  if (!existsSync(path)) return { bytes, files };
+  for (const entry of readdirSync(path, { withFileTypes: true })) {
+    const target = join(path, entry.name);
+    if (entry.isDirectory()) {
+      const nested = directoryUsage(target);
+      bytes += nested.bytes;
+      files += nested.files;
+    } else if (entry.isFile()) {
+      bytes += statSync(target).size;
+      files++;
+    }
+  }
+  return { bytes, files };
+}
+
+export function storageInventory(project, { largest = 10, benchmarkThresholdBytes = 10 * 1024 * 1024 } = {}) {
+  if (!Number.isInteger(largest) || largest < 1 || largest > 100) throw new Error('Storage inventory largest-run limit must be from 1 to 100.');
+  const runsRoot = join(project.store, 'runs');
+  const records = [];
+  const integrity = { VERIFIED: 0, UNKNOWN: 0, MISSING: 0, CORRUPT: 0 };
+  const projects = new Map();
+  let totalBytes = 0;
+  let fileCount = 0;
+  let reversibleRuns = 0;
+  let benchmarkRuns = 0;
+  let benchmarkBytes = 0;
+  if (existsSync(runsRoot)) {
+    for (const projectEntry of readdirSync(runsRoot, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
+      const projectDirectory = join(runsRoot, projectEntry.name);
+      for (const runEntry of readdirSync(projectDirectory, { withFileTypes: true }).filter((entry) => entry.isDirectory())) {
+        const runDirectory = join(projectDirectory, runEntry.name);
+        const usage = directoryUsage(runDirectory);
+        totalBytes += usage.bytes;
+        fileCount += usage.files;
+        const record = readJson(join(runDirectory, 'run.json'));
+        const selectedProject = { ...project, key: projectEntry.name };
+        let integrityState = 'CORRUPT';
+        if (record) {
+          try { integrityState = classifyRunEvidenceIntegrity(selectedProject, record); }
+          catch { integrityState = 'CORRUPT'; }
+        }
+        integrity[integrityState] = (integrity[integrityState] || 0) + 1;
+        const projectId = record?.project || projectEntry.name;
+        const projectUsage = projects.get(projectId) || { project: projectId, key: projectEntry.name, bytes: 0, files: 0, runs: 0 };
+        projectUsage.bytes += usage.bytes;
+        projectUsage.files += usage.files;
+        projectUsage.runs++;
+        projects.set(projectId, projectUsage);
+        const reversible = Boolean(record?.delta?.patchPath && existsSync(record.delta.patchPath));
+        if (reversible) reversibleRuns++;
+        const rawBytes = Number(record?.evidence?.stdout?.bytes ?? evidenceSize(record?.stdoutPath)) + Number(record?.evidence?.stderr?.bytes ?? evidenceSize(record?.stderrPath));
+        if (rawBytes >= benchmarkThresholdBytes) { benchmarkRuns++; benchmarkBytes += rawBytes; }
+        records.push({
+          runId: record?.id || runEntry.name, project: projectId, status: record?.status || 'invalid',
+          startedAt: record?.startedAt || null, bytes: usage.bytes, rawBytes, files: usage.files,
+          integrity: integrityState, reversible,
+        });
+      }
+    }
+  }
+  const dated = records.filter((record) => Number.isFinite(Date.parse(record.startedAt || ''))).sort((a, b) => Date.parse(a.startedAt) - Date.parse(b.startedAt));
+  return {
+    store: project.store,
+    totalBytes, fileCount, runCount: records.length,
+    projectCount: projects.size,
+    oldest: dated[0] ? { runId: dated[0].runId, project: dated[0].project, startedAt: dated[0].startedAt } : null,
+    newest: dated.at(-1) ? { runId: dated.at(-1).runId, project: dated.at(-1).project, startedAt: dated.at(-1).startedAt } : null,
+    integrity,
+    reversibleRuns,
+    benchmarkScale: { thresholdBytes: benchmarkThresholdBytes, runCount: benchmarkRuns, bytes: benchmarkBytes },
+    projects: [...projects.values()].sort((a, b) => b.bytes - a.bytes || a.project.localeCompare(b.project, 'en')),
+    largestRuns: [...records].sort((a, b) => b.bytes - a.bytes || a.runId.localeCompare(b.runId, 'en')).slice(0, largest),
+  };
+}
+
 function proofFromRecord(command, state, reusable, record, currentCurrency, classification, reason, integrity = record ? 'UNKNOWN' : 'MISSING') {
   const recorded = record?.currencyAfter || null;
   return {

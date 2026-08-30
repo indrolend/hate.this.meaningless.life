@@ -4,7 +4,7 @@ import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { execFileSync } from 'node:child_process';
-import { buildCurrentOperationContext, buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, classifyPowerShellShellFailure, classifyProofCurrency, compareFilesystemFiles, continuation, currentState, detectRepeatedOperationSequences, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, formatRepositoryCommandImpact, formatRepositoryCommandProof, gitSnapshot, inspectRuntimeAuthority, lintRepository, listRuns, operationDetail, operationHistory, parseLintDiagnostics, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCommandImpact, repositoryCommandProof, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
+import { buildCurrentOperationContext, buildOperationContext, buildOperationHandoff, buildPacket, buildWindowsServiceResetPlan, buildWorkflowPacket, classifyEvidence, classifyPowerShellShellFailure, classifyProofCurrency, compareFilesystemFiles, continuation, currentState, detectRepeatedOperationSequences, diffRunEvidence, discoverCommands, discoverShells, fetchUpdate, filesystemIdentity, formatPacket, formatRepositoryCommandImpact, formatRepositoryCommandProof, gitSnapshot, inspectRuntimeAuthority, lintRepository, listRuns, operationDetail, operationHistory, parseLintDiagnostics, parseResultMarkers, parseSearchOutput, parseWindowsServiceObservation, projectRunEvidence, readProjectState, recordFilesystemComparison, recoverInterruptedRuns, reduceOutput, repositoryCommandImpact, repositoryCommandProof, repositoryCurrency, repositoryTree, resolveProject, runById, runCommand, runRepositoryCommand, runTerminalCommand, searchRepository, setWorkingValue, storageInventory, undoOperation, undoPlan, workingValue, workflowView } from './core.mjs';
 
 function fixture() {
   const root = mkdtempSync(join(tmpdir(), 'hud-fixture-'));
@@ -23,6 +23,28 @@ function fixtureProject() {
   const root = fixture();
   return resolveProject({ cwd: root, env: { ...process.env, HUD_STATE_ROOT: mkdtempSync(join(tmpdir(), 'hud-state-')) } });
 }
+
+test('storage inventory reports factual retained usage and integrity without creating evidence', async () => {
+  const project = await fixtureProject();
+  const first = await runCommand(project, [process.execPath, '-e', 'console.log("alpha")'], { stream: false });
+  const second = await runCommand(project, [process.execPath, '-e', 'console.log("beta")'], { stream: false });
+  writeFileSync(second.stdoutPath, 'tampered\n');
+  const countBefore = listRuns(project, 100).length;
+  const inventory = storageInventory(project, { largest: 5, benchmarkThresholdBytes: 1 });
+  assert.equal(inventory.runCount, 2);
+  assert.equal(inventory.projectCount, 1);
+  assert.ok(inventory.totalBytes > 0);
+  assert.ok(inventory.fileCount >= 6);
+  assert.equal(inventory.integrity.VERIFIED, 1);
+  assert.equal(inventory.integrity.CORRUPT, 1);
+  assert.equal(inventory.integrity.MISSING, 0);
+  assert.equal(inventory.benchmarkScale.runCount, 2);
+  assert.equal(inventory.largestRuns.length, 2);
+  assert.deepEqual(new Set(inventory.largestRuns.map((run) => run.runId)), new Set([first.id, second.id]));
+  assert.ok(inventory.oldest?.startedAt);
+  assert.ok(inventory.newest?.startedAt);
+  assert.equal(listRuns(project, 100).length, countBefore);
+});
 
 async function proofFixtureProject() {
   const root = fixture();
