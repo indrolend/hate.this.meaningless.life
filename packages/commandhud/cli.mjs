@@ -3,6 +3,7 @@ import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { formatPacket, formatRepositoryCommandImpact, formatRepositoryCommandProof, resolveProject, gitSnapshot, repositoryCommandImpact, repositoryCommandProof, repositoryCurrency, repositoryTree, diffRunEvidence, discoverCommands, discoverTools, lintRepository, runCommand, runRepositoryCommand, searchRepository, buildCurrentOperationContext, filesystemIdentity, inspectRuntimeAuthority, lastRun, listRuns, observeWindowsService, planWindowsServiceReset, projectRunEvidence, recordFilesystemComparison, repeatedOperationSequences, runById, fetchUpdate, continuation, setWorkingValue, storageInventory, undoOperation, undoPlan, workingValue, workflowView, buildWorkflowPacket, currentState } from './core.mjs';
+import { formatContinuationHandoff } from './handoff.mjs';
 
 const HELP = `hate.this.meaningless.life · context condenser
 
@@ -483,11 +484,9 @@ async function main() {
     return;
   }
   if (command === 'handoff') {
-    const record = lastRun(project);
-    if (!record) throw new Error('No recorded run exists for this project.');
-    const context = await buildCurrentOperationContext(project, record);
-    if (options.json) return console.log(JSON.stringify({ runId: record.id, ...context }, null, 2));
-    const handoff = context.handoff;
+    const [value, git] = await Promise.all([continuation(project), gitSnapshot(project.root)]);
+    const handoff = formatContinuationHandoff(value, git);
+    if (options.json) return console.log(JSON.stringify({ ...value, git, handoff }, null, 2));
     console.log(handoff);
     if (options.copy) copy(handoff);
     return;
